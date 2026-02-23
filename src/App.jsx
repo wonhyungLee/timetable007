@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { AlertCircle, CheckCircle, Info, CalendarSync, X, ChevronLeft, ChevronRight, Copy, LayoutDashboard, CalendarDays, Calculator, MapPin, Settings, Trash2, Edit2, BookOpen, Coffee, Plus, Save } from 'lucide-react';
+import { AlertCircle, CheckCircle, Info, CalendarSync, X, ChevronLeft, ChevronRight, Copy, LayoutDashboard, CalendarDays, Calculator, MapPin, Settings, Trash2, Edit2, BookOpen, Coffee, Plus, Save, Eye, EyeOff } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from './lib/supabaseClient';
 
 // --- [1] 기본 설정 및 학사일정 주차 생성 ---
@@ -267,6 +267,7 @@ export default function TimetableApp() {
   const [monthlyLayoutMode, setMonthlyLayoutMode] = useState('class_weekly'); // matrix, class_weekly
   const [compactTextScalePercent, setCompactTextScalePercent] = useState(100);
   const [monthlyTextScalePercent, setMonthlyTextScalePercent] = useState(100);
+  const [isTopHeaderHidden, setIsTopHeaderHidden] = useState(false);
   const [currentWeekIndex, setCurrentWeekIndex] = useState(0);
   const [currentClass, setCurrentClass] = useState('1반');
   const [selectedCell, setSelectedCell] = useState(null);
@@ -998,54 +999,54 @@ export default function TimetableApp() {
     return Math.max(minPx, Math.min(maxPx, scaled));
   };
 
-  const getMonthlyClassSubjectTextStyle = (subject, hasTeacherLine) => {
+  const getMonthlyClassSubjectTextStyle = (subject, hasTeacherLine, dense = false) => {
     const px = getMonthlyFittedTextPx(subject || '-', {
-      baseWidthPx: 100,
-      maxHeightPx: hasTeacherLine ? 15 : 24,
-      minPx: 9,
-      maxPx: 28
+      baseWidthPx: dense ? 42 : 100,
+      maxHeightPx: dense ? (hasTeacherLine ? 10.5 : 14.5) : (hasTeacherLine ? 15 : 24),
+      minPx: dense ? 6.5 : 9,
+      maxPx: dense ? 18 : 28
     });
-    return { fontSize: `${px.toFixed(1)}px`, lineHeight: 1.08 };
+    return { fontSize: `${px.toFixed(1)}px`, lineHeight: dense ? 1.02 : 1.08 };
   };
 
-  const getMonthlyClassTeacherTextStyle = (teacher) => {
+  const getMonthlyClassTeacherTextStyle = (teacher, dense = false) => {
     const px = getMonthlyFittedTextPx(teacher || '-', {
-      baseWidthPx: 100,
-      maxHeightPx: 12,
-      minPx: 8,
-      maxPx: 16
+      baseWidthPx: dense ? 42 : 100,
+      maxHeightPx: dense ? 8.5 : 12,
+      minPx: dense ? 6 : 8,
+      maxPx: dense ? 12 : 16
     });
-    return { fontSize: `${px.toFixed(1)}px`, lineHeight: 1.05 };
+    return { fontSize: `${px.toFixed(1)}px`, lineHeight: 1.02 };
   };
 
-  const getMonthlyClassLocationTextStyle = (location) => {
+  const getMonthlyClassLocationTextStyle = (location, dense = false) => {
     const px = getMonthlyFittedTextPx(location || '-', {
-      baseWidthPx: 100,
-      maxHeightPx: 11,
-      minPx: 7,
-      maxPx: 14
+      baseWidthPx: dense ? 42 : 100,
+      maxHeightPx: dense ? 8 : 11,
+      minPx: dense ? 5.5 : 7,
+      maxPx: dense ? 11 : 14
     });
-    return { fontSize: `${px.toFixed(1)}px`, lineHeight: 1.05 };
+    return { fontSize: `${px.toFixed(1)}px`, lineHeight: 1.02 };
   };
 
-  const getMonthlyClassCellStyles = (weekName, className, p, d, cell) => {
+  const getMonthlyClassCellStyles = (weekName, className, p, d, cell, dense = false) => {
     const isSelected = selectedCell?.weekName === weekName && selectedCell?.className === className && selectedCell?.p === p && selectedCell?.d === d;
-    let baseStyle = 'relative transition-all duration-150 ease-in-out border border-gray-300 p-1 h-[78px] flex flex-col items-center justify-center cursor-pointer rounded ';
+    let baseStyle = `relative transition-all duration-150 ease-in-out border border-gray-300 ${dense ? 'p-0.5 h-[44px] rounded-sm' : 'p-1 h-[78px] rounded'} flex flex-col items-center justify-center cursor-pointer `;
     baseStyle += getSubjectColor(cell.subject) + ' ';
 
     if (isCellMismatchedWithTemplate(className, p, d, cell)) {
       baseStyle += 'border-red-500 border-2 ';
     }
-    if (isSelected) baseStyle += 'ring-2 ring-yellow-400 scale-[1.02] z-20 shadow ';
+    if (isSelected) baseStyle += dense ? 'ring-1 ring-yellow-400 z-20 shadow ' : 'ring-2 ring-yellow-400 scale-[1.02] z-20 shadow ';
 
     let overlay = null;
     if (selectedCell && !isSelected) {
       const validation = isSwapValid(selectedCell, weekName, className, p, d);
       if (!validation.valid) {
         baseStyle += 'opacity-50 cursor-not-allowed ';
-        overlay = <div className="absolute inset-0 bg-red-500/20 flex items-center justify-center z-20"><X className="text-red-600 w-4 h-4 opacity-70" /></div>;
+        overlay = <div className="absolute inset-0 bg-red-500/20 flex items-center justify-center z-20"><X className={`text-red-600 ${dense ? 'w-3 h-3' : 'w-4 h-4'} opacity-70`} /></div>;
       } else {
-        baseStyle += 'hover:ring-2 hover:ring-blue-300 hover:scale-[1.01] ';
+        baseStyle += dense ? 'hover:ring-1 hover:ring-blue-300 ' : 'hover:ring-2 hover:ring-blue-300 hover:scale-[1.01] ';
       }
     }
 
@@ -1077,8 +1078,18 @@ export default function TimetableApp() {
   return (
     <div className={`min-h-screen bg-slate-100 font-sans ${isWideContentMode ? 'p-2 md:p-3' : 'p-2 md:p-6'}`}>
       <div className={`${isWideContentMode ? 'w-full' : 'max-w-[1400px]'} mx-auto`}>
+        <div className="mb-2 flex justify-end">
+          <button
+            onClick={() => setIsTopHeaderHidden(prev => !prev)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-300 bg-white text-gray-700 text-xs font-semibold hover:bg-gray-100 shadow-sm"
+          >
+            {isTopHeaderHidden ? <Eye size={14} /> : <EyeOff size={14} />}
+            {isTopHeaderHidden ? '상단 헤드 보기' : '상단 헤드 숨기기'}
+          </button>
+        </div>
         
         {/* 헤더 & 탭 스위처 */}
+        {!isTopHeaderHidden && (
         <div className="bg-white rounded-2xl shadow-sm p-4 md:p-6 mb-6 border border-gray-200">
           <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-4 pb-4 border-b border-gray-100">
             <div className="flex items-center gap-3">
@@ -1192,7 +1203,7 @@ export default function TimetableApp() {
                     종합표
                   </button>
                   <button onClick={() => setMonthlyLayoutMode('class_weekly')} className={`px-3 py-1.5 text-xs rounded-md font-bold ${monthlyLayoutMode === 'class_weekly' ? 'bg-white text-indigo-700 shadow-sm' : 'text-indigo-500'}`}>
-                    학급별 주간표
+                    주차 카드형
                   </button>
                 </div>
               </div>
@@ -1209,12 +1220,8 @@ export default function TimetableApp() {
                 </div>
               ) : (
                 <div className="flex flex-col lg:flex-row lg:justify-between lg:items-center gap-3 bg-white p-2 border border-gray-200 rounded-lg shadow-sm">
-                  <div className="flex flex-wrap gap-1 bg-gray-100 p-1.5 rounded-lg">
-                    {CLASSES.map((cls) => (
-                      <button key={`monthly-class-${cls}`} onClick={() => setCurrentClass(cls)} className={`px-2 py-1.5 text-xs rounded-md font-semibold transition-colors ${currentClass === cls ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
-                        {cls}
-                      </button>
-                    ))}
+                  <div className="text-xs md:text-sm font-semibold text-indigo-700 bg-indigo-50 border border-indigo-100 px-3 py-1.5 rounded-lg">
+                    종합표 내용(1~12반)을 주차 카드 형태로 표시
                   </div>
                   <div className="flex items-center gap-2 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1.5">
                     <span className="text-xs font-bold text-indigo-600 whitespace-nowrap">텍스트 크기</span>
@@ -1239,6 +1246,7 @@ export default function TimetableApp() {
             </div>
           )}
         </div>
+        )}
 
         {/* 🛠️ [공통 퀵 에디터] 과목 변경 / 삭제 / 비고 입력 */}
         {selectedCell && (viewMode === 'weekly' || viewMode === 'monthly') && (
@@ -1511,70 +1519,86 @@ export default function TimetableApp() {
             <div className="bg-indigo-50 border-b border-indigo-100 p-3 flex justify-between items-center">
               <div className="flex items-center gap-2">
                 <Info className="text-indigo-500" size={18} />
-                <span className="text-sm text-indigo-800 font-medium">{currentClass} 월간 주차별 시간표입니다. 템플릿과 다른 칸은 빨간 테두리로 표시됩니다.</span>
+                <span className="text-sm text-indigo-800 font-medium">종합표와 같은 내용(전체 학급)을 주차별 카드 형태로 표시합니다. 템플릿과 다른 칸은 빨간 테두리로 표시됩니다.</span>
               </div>
             </div>
-            <div className="p-3 md:p-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+            <div className="p-2 md:p-3 grid grid-cols-1 gap-3">
               {MONTHS[currentMonthIndex].weekIndices.map((weekIdx) => {
                 const weekName = WEEKS[weekIdx];
-                const weekClassSchedule = allSchedules[weekName]?.[currentClass];
+                const weekSchedules = allSchedules[weekName];
                 const dayHeaders = getDatesForWeek(weekName);
 
-                if (!weekClassSchedule) return null;
+                if (!weekSchedules) return null;
 
                 return (
-                  <div key={`monthly-class-card-${weekName}-${currentClass}`} className="border border-indigo-200 rounded-xl overflow-hidden">
-                    <div className="px-3 py-2 bg-indigo-100 border-b border-indigo-200">
+                  <div key={`monthly-all-classes-week-${weekName}`} className="border border-indigo-200 rounded-xl overflow-hidden bg-white">
+                    <div className="px-3 py-2 bg-indigo-100 border-b border-indigo-200 flex items-center justify-between">
                       <p className="text-xs font-bold text-indigo-900 truncate">{weekName}</p>
+                      <span className="text-[11px] text-indigo-600 font-semibold">1반~12반</span>
                     </div>
-                    <div className="p-1.5">
-                      <table className="w-full table-fixed border-collapse min-w-full">
+                    <div className="overflow-x-auto">
+                      <table className="w-full border-collapse min-w-[1800px] table-fixed">
                         <thead>
                           <tr>
-                            <th className="w-7 p-1 text-gray-400 font-medium text-[10px]"></th>
+                            <th rowSpan={2} className="p-1 w-10 text-[10px] text-gray-500 bg-gray-50 border border-gray-200">교시</th>
                             {dayHeaders.map((dayLabel) => (
                               <th
-                                key={`monthly-class-head-${weekName}-${dayLabel}`}
-                                className="p-1 font-bold text-gray-600 bg-gray-50 border-b border-gray-200"
-                                style={{ fontSize: `${Math.max(9, Math.min(14, 11 * getMonthlyScaleRatio())).toFixed(1)}px` }}
+                                key={`monthly-all-day-head-${weekName}-${dayLabel}`}
+                                colSpan={CLASSES.length}
+                                className="p-1.5 font-bold text-gray-700 bg-indigo-50 border border-indigo-100"
+                                style={{ fontSize: `${Math.max(9, Math.min(13, 10.5 * getMonthlyScaleRatio())).toFixed(1)}px` }}
                               >
-                                {dayLabel.replace('요일', '')}
+                                {dayLabel}
                               </th>
+                            ))}
+                          </tr>
+                          <tr>
+                            {DAYS.map((day) => (
+                              CLASSES.map((cls) => (
+                                <th
+                                  key={`monthly-all-class-head-${weekName}-${day}-${cls}`}
+                                  className="p-0.5 text-[10px] font-semibold text-gray-500 bg-gray-50 border border-gray-200"
+                                >
+                                  {cls.replace('반', '')}
+                                </th>
+                              ))
                             ))}
                           </tr>
                         </thead>
                         <tbody>
                           {PERIODS.map((period, pIdx) => (
-                            <tr key={`monthly-class-row-${weekName}-${period}`}>
+                            <tr key={`monthly-all-period-row-${weekName}-${period}`}>
                               <td
-                                className="text-center font-bold text-gray-400 border-r border-gray-100 bg-gray-50/60"
-                                style={{ fontSize: `${Math.max(8, Math.min(13, 10 * getMonthlyScaleRatio())).toFixed(1)}px` }}
+                                className="text-center font-bold text-gray-500 border border-gray-200 bg-gray-50"
+                                style={{ fontSize: `${Math.max(8, Math.min(12, 9.5 * getMonthlyScaleRatio())).toFixed(1)}px` }}
                               >
                                 {period}
                               </td>
-                              {DAYS.map((_, dIdx) => {
-                                const cell = weekClassSchedule[pIdx][dIdx];
-                                const { style, overlay } = getMonthlyClassCellStyles(weekName, currentClass, pIdx, dIdx, cell);
-                                const hasTeacherLine = cell.type === 'special' && Boolean(cell.teacher);
-                                return (
-                                  <td key={`monthly-class-cell-${weekName}-${pIdx}-${dIdx}`} className="p-0.5 align-middle">
-                                    <div onClick={() => handleUniversalCellClick(weekName, currentClass, pIdx, dIdx)} className={style}>
-                                      <span className="leading-tight font-semibold text-gray-800" style={getMonthlyClassSubjectTextStyle(cell.subject || '-', hasTeacherLine)}>
-                                        {cell.subject || '-'}
-                                      </span>
-                                      {cell.type === 'special' && cell.teacher && (
-                                        <span className="leading-tight text-gray-700 truncate max-w-full" style={getMonthlyClassTeacherTextStyle(cell.teacher)}>{cell.teacher}</span>
-                                      )}
-                                      {cell.location && (
-                                        <span className="leading-tight text-gray-600 truncate max-w-full px-0.5" style={getMonthlyClassLocationTextStyle(cell.location)}>
-                                          {cell.location}
+                              {DAYS.map((_, dIdx) => (
+                                CLASSES.map((cls) => {
+                                  const cell = weekSchedules[cls][pIdx][dIdx];
+                                  const { style, overlay } = getMonthlyClassCellStyles(weekName, cls, pIdx, dIdx, cell, true);
+                                  const hasTeacherLine = cell.type === 'special' && Boolean(cell.teacher);
+                                  return (
+                                    <td key={`monthly-all-cell-${weekName}-${pIdx}-${dIdx}-${cls}`} className="p-0.5 align-middle">
+                                      <div onClick={() => { setCurrentClass(cls); handleUniversalCellClick(weekName, cls, pIdx, dIdx); }} className={style}>
+                                        <span className="leading-tight font-semibold text-gray-800 truncate max-w-full px-0.5" style={getMonthlyClassSubjectTextStyle(cell.subject || '-', hasTeacherLine, true)}>
+                                          {cell.subject === '휴업일' ? '휴업' : (cell.subject || '-')}
                                         </span>
-                                      )}
-                                      {overlay}
-                                    </div>
-                                  </td>
-                                );
-                              })}
+                                        {cell.type === 'special' && cell.teacher && (
+                                          <span className="leading-tight text-gray-700 truncate max-w-full px-0.5" style={getMonthlyClassTeacherTextStyle(cell.teacher, true)}>{cell.teacher}</span>
+                                        )}
+                                        {cell.location && (
+                                          <span className="leading-tight text-gray-600 truncate max-w-full px-0.5" style={getMonthlyClassLocationTextStyle(cell.location, true)}>
+                                            {cell.location}
+                                          </span>
+                                        )}
+                                        {overlay}
+                                      </div>
+                                    </td>
+                                  );
+                                })
+                              ))}
                             </tr>
                           ))}
                         </tbody>
