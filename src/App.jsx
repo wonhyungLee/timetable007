@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { AlertCircle, CheckCircle, Info, CalendarSync, X, ChevronLeft, ChevronRight, Copy, LayoutDashboard, CalendarDays, Calculator, MapPin, Settings, Trash2, Edit2, BookOpen, Coffee } from 'lucide-react';
+import { AlertCircle, CheckCircle, Info, CalendarSync, X, ChevronLeft, ChevronRight, Copy, LayoutDashboard, CalendarDays, Calculator, MapPin, Settings, Trash2, Edit2, BookOpen, Coffee, Plus, Save } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from './lib/supabaseClient';
 
 // --- [1] 기본 설정 및 학사일정 주차 생성 ---
@@ -181,6 +181,41 @@ const createAllSchedules = (teachers = initialTeachers) => {
   return allByWeek;
 };
 
+const DEFAULT_HOMEROOM_SUBJECTS = ['국어', '수학', '사회', '도덕', '미술', '창체'];
+
+const createEmptyTeacherTemplate = () =>
+  Array.from({ length: PERIODS.length }, () => Array(DAYS.length).fill(''));
+
+const normalizeSpecialTemplates = (teachers, templates = {}) => {
+  const normalized = {};
+
+  teachers.forEach((teacher) => {
+    const template = createEmptyTeacherTemplate();
+    const allowedClassNames = new Set(teacher.classes.map((num) => `${num}반`));
+    const rawTemplate = templates?.[teacher.id];
+
+    for (let p = 0; p < PERIODS.length; p++) {
+      for (let d = 0; d < DAYS.length; d++) {
+        let candidate = rawTemplate?.[p]?.[d] ?? '';
+        if (typeof candidate === 'number') candidate = `${candidate}반`;
+        if (typeof candidate !== 'string') candidate = '';
+        template[p][d] = allowedClassNames.has(candidate) ? candidate : '';
+      }
+    }
+
+    normalized[teacher.id] = template;
+  });
+
+  return normalized;
+};
+
+const createHomeroomFallbackCell = (className, periodIndex, dayIndex) => ({
+  subject: DEFAULT_HOMEROOM_SUBJECTS[(periodIndex + dayIndex) % DEFAULT_HOMEROOM_SUBJECTS.length],
+  type: 'homeroom',
+  location: '',
+  id: `${className}-${periodIndex}-${dayIndex}`
+});
+
 const SHARED_STATE_ROW_ID = 'main';
 const SYNC_DEBOUNCE_MS = 1200;
 
@@ -189,6 +224,7 @@ const isValidSharedPayload = (payload) => {
   if (!payload.allSchedules || typeof payload.allSchedules !== 'object') return false;
   if (!payload.standardHours || typeof payload.standardHours !== 'object') return false;
   if (!Array.isArray(payload.teacherConfigs)) return false;
+  if (payload.specialTemplates !== undefined && (!payload.specialTemplates || typeof payload.specialTemplates !== 'object')) return false;
   return true;
 };
 
@@ -205,12 +241,21 @@ export default function TimetableApp() {
   });
 
   const [viewMode, setViewMode] = useState('weekly'); // weekly, monthly, class_summary, teacher_summary, settings
+  const [weeklyLayoutMode, setWeeklyLayoutMode] = useState('single'); // single, all
   const [currentWeekIndex, setCurrentWeekIndex] = useState(0);
   const [currentClass, setCurrentClass] = useState('1반');
   const [selectedCell, setSelectedCell] = useState(null);
   const [currentMonthIndex, setCurrentMonthIndex] = useState(0);
   const [highlightTeacherId, setHighlightTeacherId] = useState(null);
   const [toast, setToast] = useState({ show: false, message: '', type: '' });
+  const [editingTeacherId, setEditingTeacherId] = useState(null);
+  const [teacherForm, setTeacherForm] = useState({
+    name: '',
+    subject: '체육',
+    classes: []
+  });
+  const [specialTemplates, setSpecialTemplates] = useState(() => normalizeSpecialTemplates(initialTeachers));
+  const [selectedTemplateTeacherId, setSelectedTemplateTeacherId] = useState(initialTeachers[0]?.id || '');
   const [syncStatus, setSyncStatus] = useState(
     isSupabaseConfigured ? '초기 동기화 중...' : '로컬 모드 (동기화 비활성)'
   );
@@ -223,6 +268,10 @@ export default function TimetableApp() {
   
   const currentWeekName = WEEKS[currentWeekIndex];
   const schedules = allSchedules[currentWeekName];
+  const selectedTemplateTeacher = teacherConfigs.find((teacher) => teacher.id === selectedTemplateTeacherId) || null;
+  const selectedTeacherTemplate = selectedTemplateTeacher
+    ? (specialTemplates[selectedTemplateTeacher.id] || createEmptyTeacherTemplate())
+    : createEmptyTeacherTemplate();
 
   useEffect(() => {
     if (toast.show) {
@@ -232,6 +281,198 @@ export default function TimetableApp() {
   }, [toast]);
 
   const showNotification = (message, type = 'error') => setToast({ show: true, message, type });
+  const teacherAssignableSubjects = ALL_SUBJECTS.filter(subject => subject !== '휴업일');
+
+  const resetTeacherForm = () => {
+    setEditingTeacherId(null);
+    setTeacherForm({
+      name: '',
+      subject: teacherAssignableSubjects.includes('체육') ? '체육' : (teacherAssignableSubjects[0] || ''),
+      classes: []
+    });
+  };
+
+  const toggleTeacherClassSelection = (classNum) => {
+    setTeacherForm((prev) => {
+      const hasClass = prev.classes.includes(classNum);
+      const nextClasses = hasClass
+        ? prev.classes.filter(num => num !== classNum)
+        : [...prev.classes, classNum];
+      return {
+        ...prev,
+        classes: nextClasses.sort((a, b) => a - b)
+      };
+    });
+  };
+
+  const startTeacherEdit = (teacher) => {
+    setEditingTeacherId(teacher.id);
+    setTeacherForm({
+      name: teacher.name,
+      subject: teacher.subject,
+      classes: [...teacher.classes].sort((a, b) => a - b)
+    });
+  };
+
+  const saveTeacherConfig = () => {
+    const trimmedName = teacherForm.name.trim();
+    const selectedClasses = [...new Set(teacherForm.classes)].sort((a, b) => a - b);
+
+    if (!trimmedName) {
+      showNotification('교사명을 입력해주세요.', 'error');
+      return;
+    }
+    if (!teacherForm.subject) {
+      showNotification('담당 과목을 선택해주세요.', 'error');
+      return;
+    }
+    if (selectedClasses.length === 0) {
+      showNotification('담당 학급을 1개 이상 선택해주세요.', 'error');
+      return;
+    }
+
+    if (editingTeacherId) {
+      setTeacherConfigs((prev) =>
+        prev.map((teacher) =>
+          teacher.id === editingTeacherId
+            ? { ...teacher, name: trimmedName, subject: teacherForm.subject, classes: selectedClasses }
+            : teacher
+        )
+      );
+      showNotification('전담 교사 정보가 수정되었습니다.', 'success');
+    } else {
+      const newTeacher = {
+        id: `t${Date.now().toString(36)}`,
+        name: trimmedName,
+        subject: teacherForm.subject,
+        classes: selectedClasses
+      };
+      setTeacherConfigs((prev) => [...prev, newTeacher]);
+      showNotification('전담 교사가 추가되었습니다.', 'success');
+    }
+
+    resetTeacherForm();
+  };
+
+  const deleteTeacherConfig = (teacher) => {
+    const ok = window.confirm(
+      `${teacher.name} 선생님을 삭제하시겠습니까?\n\n삭제 후 시간표에 완전히 반영하려면 '전체 초기화 (새로 배정)'를 실행하세요.`
+    );
+    if (!ok) return;
+
+    setTeacherConfigs((prev) => prev.filter((item) => item.id !== teacher.id));
+    if (editingTeacherId === teacher.id) resetTeacherForm();
+    if (highlightTeacherId === teacher.id) setHighlightTeacherId(null);
+    showNotification('전담 교사가 삭제되었습니다.', 'success');
+  };
+
+  useEffect(() => {
+    setSpecialTemplates((prev) => normalizeSpecialTemplates(teacherConfigs, prev));
+    setSelectedTemplateTeacherId((prev) => {
+      if (teacherConfigs.some((teacher) => teacher.id === prev)) return prev;
+      return teacherConfigs[0]?.id || '';
+    });
+  }, [teacherConfigs]);
+
+  const updateTemplateCell = (teacherId, periodIndex, dayIndex, className) => {
+    setSpecialTemplates((prev) => {
+      const next = normalizeSpecialTemplates(teacherConfigs, prev);
+      if (!next[teacherId]) next[teacherId] = createEmptyTeacherTemplate();
+      next[teacherId][periodIndex][dayIndex] = className;
+      return next;
+    });
+  };
+
+  const clearTeacherTemplate = (teacherId) => {
+    setSpecialTemplates((prev) => ({
+      ...normalizeSpecialTemplates(teacherConfigs, prev),
+      [teacherId]: createEmptyTeacherTemplate()
+    }));
+  };
+
+  const applySpecialTemplateToWeeks = (targetWeeks) => {
+    if (teacherConfigs.length === 0) {
+      showNotification('전담 교사가 없습니다. 먼저 전담 교사를 등록해주세요.', 'error');
+      return;
+    }
+
+    const normalizedTemplates = normalizeSpecialTemplates(teacherConfigs, specialTemplates);
+    const newAllSchedules = { ...allSchedules };
+
+    for (const weekName of targetWeeks) {
+      const sourceWeek = newAllSchedules[weekName];
+      if (!sourceWeek) continue;
+
+      const weekSchedule = JSON.parse(JSON.stringify(sourceWeek));
+
+      CLASSES.forEach((className) => {
+        for (let p = 0; p < PERIODS.length; p++) {
+          for (let d = 0; d < DAYS.length; d++) {
+            if (weekSchedule[className][p][d]?.type === 'special') {
+              weekSchedule[className][p][d] = createHomeroomFallbackCell(className, p, d);
+            }
+          }
+        }
+      });
+
+      for (const teacher of teacherConfigs) {
+        const teacherTemplate = normalizedTemplates[teacher.id] || createEmptyTeacherTemplate();
+        const allowedClassNames = new Set(teacher.classes.map((num) => `${num}반`));
+
+        for (let p = 0; p < PERIODS.length; p++) {
+          for (let d = 0; d < DAYS.length; d++) {
+            const targetClass = teacherTemplate[p][d];
+            if (!targetClass) continue;
+
+            if (!allowedClassNames.has(targetClass)) {
+              showNotification(`[${teacher.name}] ${targetClass}은 담당 학급이 아닙니다.`, 'error');
+              return;
+            }
+
+            if (!weekSchedule[targetClass]?.[p]?.[d]) continue;
+
+            if (weekSchedule[targetClass][p][d].type === 'special') {
+              showNotification(`[${weekName}] ${DAYS[d]} ${PERIODS[p]}교시에 ${targetClass} 중복 전담 배정입니다.`, 'error');
+              return;
+            }
+
+            weekSchedule[targetClass][p][d] = {
+              subject: teacher.subject,
+              type: 'special',
+              teacher: teacher.name,
+              teacherId: teacher.id,
+              location: getDefaultLocation(teacher.subject, d, p),
+              id: `${targetClass}-${p}-${d}-special`
+            };
+          }
+        }
+      }
+
+      newAllSchedules[weekName] = weekSchedule;
+    }
+
+    setSpecialTemplates(normalizedTemplates);
+    setAllSchedules(newAllSchedules);
+    setSelectedCell(null);
+    showNotification(
+      targetWeeks.length === 1
+        ? `전담 시간표를 [${targetWeeks[0]}] 전체 학급에 배정했습니다.`
+        : '전담 시간표를 모든 주차 전체 학급에 배정했습니다.',
+      'success'
+    );
+  };
+
+  const applySpecialTemplateToCurrentWeek = () => {
+    const ok = window.confirm(`현재 주차 [${currentWeekName}]에 전담 시간표 템플릿을 전체 학급에 배정하시겠습니까?`);
+    if (!ok) return;
+    applySpecialTemplateToWeeks([currentWeekName]);
+  };
+
+  const applySpecialTemplateToAllWeeks = () => {
+    const ok = window.confirm('모든 주차에 전담 시간표 템플릿을 일괄 배정하시겠습니까? 기존 전담 배정은 덮어써집니다.');
+    if (!ok) return;
+    applySpecialTemplateToWeeks(WEEKS);
+  };
 
   useEffect(() => {
     if (!isSupabaseConfigured || !supabase) return undefined;
@@ -241,11 +482,20 @@ export default function TimetableApp() {
     const applyRemotePayload = (payload, syncedAt) => {
       if (!isValidSharedPayload(payload)) return;
 
+      const normalizedRemoteTemplates = normalizeSpecialTemplates(
+        payload.teacherConfigs,
+        payload.specialTemplates || {}
+      );
+
       isApplyingRemoteRef.current = true;
       setAllSchedules(payload.allSchedules);
       setStandardHours(payload.standardHours);
       setTeacherConfigs(payload.teacherConfigs);
-      lastSyncedPayloadRef.current = JSON.stringify(payload);
+      setSpecialTemplates(normalizedRemoteTemplates);
+      lastSyncedPayloadRef.current = JSON.stringify({
+        ...payload,
+        specialTemplates: normalizedRemoteTemplates
+      });
       setLastSyncedAt(syncedAt || new Date().toISOString());
       setTimeout(() => {
         isApplyingRemoteRef.current = false;
@@ -271,7 +521,7 @@ export default function TimetableApp() {
         applyRemotePayload(data.payload, data.updated_at);
         setSyncStatus('실시간 동기화 연결됨');
       } else {
-        const initialPayload = { allSchedules, standardHours, teacherConfigs };
+        const initialPayload = { allSchedules, standardHours, teacherConfigs, specialTemplates };
         const payloadText = JSON.stringify(initialPayload);
         const { error: upsertError } = await supabase.from('timetable_state').upsert(
           { id: SHARED_STATE_ROW_ID, payload: initialPayload, updated_by: clientIdRef.current },
@@ -332,7 +582,7 @@ export default function TimetableApp() {
     if (!isRemoteReadyRef.current) return undefined;
     if (isApplyingRemoteRef.current) return undefined;
 
-    const payload = { allSchedules, standardHours, teacherConfigs };
+    const payload = { allSchedules, standardHours, teacherConfigs, specialTemplates };
     const payloadText = JSON.stringify(payload);
 
     if (payloadText === lastSyncedPayloadRef.current) return undefined;
@@ -357,7 +607,7 @@ export default function TimetableApp() {
     return () => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     };
-  }, [allSchedules, standardHours, teacherConfigs]);
+  }, [allSchedules, standardHours, teacherConfigs, specialTemplates]);
 
   // 충돌 검사 (선생님 기준)
   const isSwapValid = (sourceCell, targetWeek, targetClass, targetP, targetD) => {
@@ -547,6 +797,27 @@ export default function TimetableApp() {
     return { style: baseStyle, overlay };
   };
 
+  const getCompactCellStyles = (className, p, d, cell) => {
+    const isSelected = selectedCell?.weekName === currentWeekName && selectedCell?.className === className && selectedCell?.p === p && selectedCell?.d === d;
+    let baseStyle = 'relative transition-all duration-150 ease-in-out border border-gray-300 p-1 h-14 flex flex-col items-center justify-center cursor-pointer rounded ';
+    baseStyle += getSubjectColor(cell.subject) + ' ';
+
+    if (isSelected) baseStyle += 'ring-2 ring-yellow-400 scale-[1.03] z-20 shadow ';
+
+    let overlay = null;
+    if (selectedCell && !isSelected) {
+      const validation = isSwapValid(selectedCell, currentWeekName, className, p, d);
+      if (!validation.valid) {
+        baseStyle += 'opacity-50 cursor-not-allowed ';
+        overlay = <div className="absolute inset-0 bg-red-500/20 flex items-center justify-center z-20"><X className="text-red-600 w-4 h-4 opacity-70" /></div>;
+      } else {
+        baseStyle += 'hover:ring-2 hover:ring-blue-300 hover:scale-[1.02] ';
+      }
+    }
+
+    return { style: baseStyle, overlay };
+  };
+
   // --- 집계 로직 (전체 학급 교과 시수) ---
   const calculateAllClassesSummary = () => {
     const counts = {};
@@ -634,7 +905,15 @@ export default function TimetableApp() {
                 ))}
               </div>
               
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
+                <div className="flex bg-gray-100 p-1 rounded-lg">
+                  <button onClick={() => setWeeklyLayoutMode('single')} className={`px-3 py-1.5 text-xs rounded-md font-bold ${weeklyLayoutMode === 'single' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500'}`}>
+                    단일 학급
+                  </button>
+                  <button onClick={() => setWeeklyLayoutMode('all')} className={`px-3 py-1.5 text-xs rounded-md font-bold ${weeklyLayoutMode === 'all' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500'}`}>
+                    전체 학급
+                  </button>
+                </div>
                 <button onClick={applyToFutureWeeks} className="flex justify-center items-center gap-1 px-3 py-2 bg-indigo-50 border border-indigo-200 text-indigo-700 rounded-lg hover:bg-indigo-100 text-sm font-bold whitespace-nowrap shadow-sm">
                   <Copy size={16} /> 이후 덮어쓰기 (현재 반)
                 </button>
@@ -724,7 +1003,7 @@ export default function TimetableApp() {
 
         {/* ======================= VIEW RENDERING ======================= */}
         
-        {viewMode === 'weekly' && (
+        {viewMode === 'weekly' && weeklyLayoutMode === 'single' && (
           <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
             <div className="bg-slate-50 border-b border-gray-200 p-4 flex justify-between items-center">
               <h2 className="text-xl font-bold text-gray-800">
@@ -771,6 +1050,65 @@ export default function TimetableApp() {
                   ))}
                 </tbody>
               </table>
+            </div>
+          </div>
+        )}
+
+        {viewMode === 'weekly' && weeklyLayoutMode === 'all' && (
+          <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+            <div className="bg-slate-50 border-b border-gray-200 p-4 flex flex-col md:flex-row md:justify-between md:items-center gap-2">
+              <h2 className="text-xl font-bold text-gray-800">
+                <span className="text-blue-600">[{currentWeekName}]</span> 전체 학급 주간 시간표
+              </h2>
+              <p className="text-xs text-gray-500">각 학급의 주간표를 축소해서 한 화면에 배치했습니다. 칸 클릭으로 교환/편집 가능합니다.</p>
+            </div>
+            <div className="p-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+              {CLASSES.map((cls) => (
+                <div key={cls} className={`border rounded-xl overflow-hidden ${currentClass === cls ? 'border-blue-300 ring-2 ring-blue-100' : 'border-gray-200'}`}>
+                  <div className="px-3 py-2 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
+                    <button onClick={() => setCurrentClass(cls)} className="font-bold text-sm text-gray-800 hover:text-blue-600">
+                      {cls}
+                    </button>
+                    {currentClass === cls && <span className="text-[10px] px-2 py-0.5 rounded bg-blue-100 text-blue-700 font-bold">기준 학급</span>}
+                  </div>
+                  <div className="p-2 overflow-x-auto">
+                    <table className="w-full border-collapse text-[10px] min-w-[280px]">
+                      <thead>
+                        <tr>
+                          <th className="w-8 p-1 text-gray-400 font-medium"></th>
+                          {DAYS.map((day) => (
+                            <th key={`${cls}-${day}`} className="p-1 font-bold text-gray-600 bg-gray-50 border-b border-gray-200">{day}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {PERIODS.map((period, pIndex) => (
+                          <tr key={`${cls}-${period}`}>
+                            <td className="text-center font-bold text-gray-400 border-r border-gray-100 bg-gray-50/60">{period}</td>
+                            {DAYS.map((_, dIndex) => {
+                              const cell = schedules[cls][pIndex][dIndex];
+                              const { style, overlay } = getCompactCellStyles(cls, pIndex, dIndex, cell);
+                              return (
+                                <td key={`${cls}-${pIndex}-${dIndex}`} className="p-0.5 align-middle">
+                                  <div onClick={() => { setCurrentClass(cls); handleUniversalCellClick(currentWeekName, cls, pIndex, dIndex); }} className={style}>
+                                    <span className="text-[10px] leading-tight font-semibold text-gray-800">
+                                      {cell.subject || '-'}
+                                    </span>
+                                    {cell.type === 'special' && cell.teacher && (
+                                      <span className="text-[9px] leading-tight text-gray-700 truncate max-w-full">{cell.teacher}</span>
+                                    )}
+                                    {overlay}
+                                  </div>
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         )}
@@ -995,11 +1333,207 @@ export default function TimetableApp() {
         {/* ======================= SETTINGS VIEW ======================= */}
         {viewMode === 'settings' && (
           <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 animate-fade-in">
-            <div className="flex justify-between items-center mb-6 border-b pb-4">
+            <div className="flex flex-col md:flex-row md:justify-between md:items-center mb-6 border-b pb-4 gap-3">
               <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2"><Settings className="text-orange-600"/> 전담 교사 관리</h2>
-              <button onClick={() => window.confirm('전체 시간표를 새로 만드시겠습니까?') && setAllSchedules(createAllSchedules(teacherConfigs))} className="px-4 py-2 bg-red-50 text-red-600 border border-red-200 rounded-lg hover:bg-red-100 font-bold text-sm">전체 초기화 (새로 배정)</button>
+              <button onClick={() => window.confirm('현재 전담 교사 설정으로 전체 시간표를 새로 배정하시겠습니까?') && setAllSchedules(createAllSchedules(teacherConfigs))} className="px-4 py-2 bg-red-50 text-red-600 border border-red-200 rounded-lg hover:bg-red-100 font-bold text-sm whitespace-nowrap">전체 초기화 (새로 배정)</button>
             </div>
-            <p className="text-gray-500">※ 교사 관리 기능은 이전 버전과 동일하게 정상 작동합니다.</p>
+
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+              <div className="xl:col-span-2 border border-gray-200 rounded-xl overflow-hidden">
+                <div className="bg-orange-50 px-4 py-3 border-b border-orange-100 font-bold text-orange-900">등록된 전담 교사 목록</div>
+                <div className="overflow-x-auto">
+                  <table className="w-full border-collapse text-sm">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="text-left p-3 border-b border-gray-200">교사명</th>
+                        <th className="text-left p-3 border-b border-gray-200">과목</th>
+                        <th className="text-left p-3 border-b border-gray-200">담당 학급</th>
+                        <th className="text-left p-3 border-b border-gray-200">작업</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {teacherConfigs.map((teacher) => (
+                        <tr key={teacher.id} className="hover:bg-gray-50">
+                          <td className="p-3 border-b border-gray-100 font-semibold text-gray-800">{teacher.name}</td>
+                          <td className="p-3 border-b border-gray-100">
+                            <span className={`px-2 py-1 rounded text-xs font-bold text-gray-900 ${getSubjectColor(teacher.subject)}`}>{teacher.subject}</span>
+                          </td>
+                          <td className="p-3 border-b border-gray-100">
+                            <div className="flex flex-wrap gap-1">
+                              {[...teacher.classes].sort((a, b) => a - b).map((num) => (
+                                <span key={`${teacher.id}-${num}`} className="px-2 py-0.5 bg-gray-100 rounded text-xs text-gray-700">{num}반</span>
+                              ))}
+                            </div>
+                          </td>
+                          <td className="p-3 border-b border-gray-100">
+                            <div className="flex gap-2">
+                              <button onClick={() => startTeacherEdit(teacher)} className="px-2.5 py-1.5 bg-blue-50 text-blue-700 border border-blue-200 rounded text-xs font-bold hover:bg-blue-100">수정</button>
+                              <button onClick={() => deleteTeacherConfig(teacher)} className="px-2.5 py-1.5 bg-red-50 text-red-700 border border-red-200 rounded text-xs font-bold hover:bg-red-100">삭제</button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                      {teacherConfigs.length === 0 && (
+                        <tr>
+                          <td colSpan={4} className="p-6 text-center text-gray-400">등록된 전담 교사가 없습니다.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div className="border border-gray-200 rounded-xl p-4 bg-gray-50">
+                <h3 className="font-bold text-gray-800 mb-4">
+                  {editingTeacherId ? '전담 교사 수정' : '전담 교사 추가'}
+                </h3>
+
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-bold text-gray-500 mb-1">교사명</label>
+                    <input
+                      type="text"
+                      value={teacherForm.name}
+                      onChange={(e) => setTeacherForm((prev) => ({ ...prev, name: e.target.value }))}
+                      placeholder="예: 홍길동"
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-gray-500 mb-1">담당 과목</label>
+                    <select
+                      value={teacherForm.subject}
+                      onChange={(e) => setTeacherForm((prev) => ({ ...prev, subject: e.target.value }))}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-orange-400"
+                    >
+                      {teacherAssignableSubjects.map((subject) => (
+                        <option key={subject} value={subject}>{subject}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-gray-500 mb-2">담당 학급</label>
+                    <div className="grid grid-cols-4 gap-2">
+                      {Array.from({ length: 12 }, (_, idx) => idx + 1).map((classNum) => {
+                        const isSelected = teacherForm.classes.includes(classNum);
+                        return (
+                          <button
+                            key={classNum}
+                            type="button"
+                            onClick={() => toggleTeacherClassSelection(classNum)}
+                            className={`px-2 py-1.5 rounded text-xs font-bold border transition-colors ${isSelected ? 'bg-orange-500 text-white border-orange-500' : 'bg-white text-gray-600 border-gray-300 hover:bg-orange-50'}`}
+                          >
+                            {classNum}반
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="flex gap-2 pt-2">
+                    <button onClick={saveTeacherConfig} className="flex items-center justify-center gap-1 px-3 py-2 bg-orange-500 text-white rounded-lg font-bold text-sm hover:bg-orange-600">
+                      {editingTeacherId ? <Save size={14} /> : <Plus size={14} />}
+                      {editingTeacherId ? '수정 저장' : '교사 추가'}
+                    </button>
+                    <button onClick={resetTeacherForm} className="px-3 py-2 bg-white text-gray-600 border border-gray-300 rounded-lg font-bold text-sm hover:bg-gray-100">
+                      입력 초기화
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-6 border border-indigo-200 rounded-xl overflow-hidden">
+              <div className="bg-indigo-50 px-4 py-3 border-b border-indigo-100 flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+                <h3 className="font-bold text-indigo-900">전담 시간표 템플릿 작성 (교사별)</h3>
+                <div className="flex flex-wrap gap-2">
+                  <button onClick={applySpecialTemplateToCurrentWeek} className="px-3 py-1.5 text-xs font-bold bg-indigo-600 text-white rounded hover:bg-indigo-700">
+                    현재 주차 전체학급 배정
+                  </button>
+                  <button onClick={applySpecialTemplateToAllWeeks} className="px-3 py-1.5 text-xs font-bold bg-violet-100 text-violet-700 border border-violet-200 rounded hover:bg-violet-200">
+                    모든 주차 일괄 배정
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-4 bg-white">
+                {teacherConfigs.length > 0 ? (
+                  <>
+                    <div className="flex flex-col md:flex-row md:items-center gap-2 mb-4">
+                      <span className="text-xs font-bold text-gray-500">템플릿 교사</span>
+                      <select
+                        value={selectedTemplateTeacherId}
+                        onChange={(e) => setSelectedTemplateTeacherId(e.target.value)}
+                        className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                      >
+                        {teacherConfigs.map((teacher) => (
+                          <option key={teacher.id} value={teacher.id}>
+                            {teacher.name} ({teacher.subject})
+                          </option>
+                        ))}
+                      </select>
+                      {selectedTemplateTeacher && (
+                        <button
+                          onClick={() => clearTeacherTemplate(selectedTemplateTeacher.id)}
+                          className="px-3 py-2 text-xs font-bold bg-gray-100 text-gray-700 rounded border border-gray-300 hover:bg-gray-200"
+                        >
+                          선택 교사 템플릿 비우기
+                        </button>
+                      )}
+                    </div>
+
+                    {selectedTemplateTeacher && (
+                      <div className="overflow-x-auto">
+                        <table className="w-full border-collapse text-xs min-w-[720px]">
+                          <thead>
+                            <tr className="bg-gray-50 text-gray-700">
+                              <th className="border border-gray-200 p-2 w-16">교시</th>
+                              {DAYS.map((day) => (
+                                <th key={`tpl-head-${day}`} className="border border-gray-200 p-2">{day}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {PERIODS.map((period, pIndex) => (
+                              <tr key={`tpl-row-${period}`}>
+                                <td className="border border-gray-200 p-2 text-center font-bold bg-gray-50">{period}교시</td>
+                                {DAYS.map((_, dIndex) => (
+                                  <td key={`tpl-cell-${pIndex}-${dIndex}`} className="border border-gray-200 p-1">
+                                    <select
+                                      value={selectedTeacherTemplate[pIndex][dIndex]}
+                                      onChange={(e) => updateTemplateCell(selectedTemplateTeacher.id, pIndex, dIndex, e.target.value)}
+                                      className="w-full border border-gray-200 rounded px-2 py-1.5 bg-white text-xs focus:outline-none focus:ring-2 focus:ring-indigo-400"
+                                    >
+                                      <option value="">- 비움 -</option>
+                                      {[...selectedTemplateTeacher.classes].sort((a, b) => a - b).map((num) => {
+                                        const className = `${num}반`;
+                                        return (
+                                          <option key={`tpl-opt-${selectedTemplateTeacher.id}-${className}`} value={className}>
+                                            {className}
+                                          </option>
+                                        );
+                                      })}
+                                    </select>
+                                  </td>
+                                ))}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <p className="text-sm text-gray-400">전담 교사를 먼저 등록해주세요.</p>
+                )}
+              </div>
+            </div>
+
+            <p className="text-gray-500 text-sm mt-4">
+              ※ 전담 교사 설정을 바꾼 뒤 기존 시간표에 반영하려면 <span className="font-bold text-red-600">전체 초기화 (새로 배정)</span> 또는 <span className="font-bold text-indigo-700">전담 시간표 템플릿 배정</span>을 실행하세요.
+            </p>
           </div>
         )}
 
