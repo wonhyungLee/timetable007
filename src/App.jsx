@@ -183,8 +183,15 @@ const createAllSchedules = (teachers = initialTeachers) => {
 
 const DEFAULT_HOMEROOM_SUBJECTS = ['국어', '수학', '사회', '도덕', '미술', '창체'];
 
+const createTemplateCell = (className = '', location = '') => ({
+  className,
+  location
+});
+
 const createEmptyTeacherTemplate = () =>
-  Array.from({ length: PERIODS.length }, () => Array(DAYS.length).fill(''));
+  Array.from({ length: PERIODS.length }, () =>
+    Array.from({ length: DAYS.length }, () => createTemplateCell())
+  );
 
 const normalizeSpecialTemplates = (teachers, templates = {}) => {
   const normalized = {};
@@ -196,10 +203,25 @@ const normalizeSpecialTemplates = (teachers, templates = {}) => {
 
     for (let p = 0; p < PERIODS.length; p++) {
       for (let d = 0; d < DAYS.length; d++) {
-        let candidate = rawTemplate?.[p]?.[d] ?? '';
-        if (typeof candidate === 'number') candidate = `${candidate}반`;
-        if (typeof candidate !== 'string') candidate = '';
-        template[p][d] = allowedClassNames.has(candidate) ? candidate : '';
+        const rawCell = rawTemplate?.[p]?.[d];
+        let className = '';
+        let location = '';
+
+        if (typeof rawCell === 'number' || typeof rawCell === 'string') {
+          const candidate = typeof rawCell === 'number' ? `${rawCell}반` : rawCell;
+          className = candidate;
+        } else if (rawCell && typeof rawCell === 'object') {
+          const candidateRaw = rawCell.className ?? '';
+          const candidate = typeof candidateRaw === 'number' ? `${candidateRaw}반` : candidateRaw;
+          className = typeof candidate === 'string' ? candidate : '';
+          location = typeof rawCell.location === 'string' ? rawCell.location : '';
+        }
+
+        if (!allowedClassNames.has(className)) {
+          template[p][d] = createTemplateCell();
+        } else {
+          template[p][d] = createTemplateCell(className, location.trim());
+        }
       }
     }
 
@@ -242,6 +264,7 @@ export default function TimetableApp() {
 
   const [viewMode, setViewMode] = useState('weekly'); // weekly, monthly, class_summary, teacher_summary, settings
   const [weeklyLayoutMode, setWeeklyLayoutMode] = useState('single'); // single, all
+  const [compactTextScalePercent, setCompactTextScalePercent] = useState(100);
   const [currentWeekIndex, setCurrentWeekIndex] = useState(0);
   const [currentClass, setCurrentClass] = useState('1반');
   const [selectedCell, setSelectedCell] = useState(null);
@@ -272,6 +295,7 @@ export default function TimetableApp() {
   const selectedTeacherTemplate = selectedTemplateTeacher
     ? (specialTemplates[selectedTemplateTeacher.id] || createEmptyTeacherTemplate())
     : createEmptyTeacherTemplate();
+  const isWeeklyAllView = viewMode === 'weekly' && weeklyLayoutMode === 'all';
 
   useEffect(() => {
     if (toast.show) {
@@ -378,7 +402,21 @@ export default function TimetableApp() {
     setSpecialTemplates((prev) => {
       const next = normalizeSpecialTemplates(teacherConfigs, prev);
       if (!next[teacherId]) next[teacherId] = createEmptyTeacherTemplate();
-      next[teacherId][periodIndex][dayIndex] = className;
+      const previousCell = next[teacherId][periodIndex][dayIndex] || createTemplateCell();
+      next[teacherId][periodIndex][dayIndex] = createTemplateCell(
+        className,
+        className ? previousCell.location : ''
+      );
+      return next;
+    });
+  };
+
+  const updateTemplateLocation = (teacherId, periodIndex, dayIndex, location) => {
+    setSpecialTemplates((prev) => {
+      const next = normalizeSpecialTemplates(teacherConfigs, prev);
+      if (!next[teacherId]) next[teacherId] = createEmptyTeacherTemplate();
+      const previousCell = next[teacherId][periodIndex][dayIndex] || createTemplateCell();
+      next[teacherId][periodIndex][dayIndex] = createTemplateCell(previousCell.className, location);
       return next;
     });
   };
@@ -421,7 +459,8 @@ export default function TimetableApp() {
 
         for (let p = 0; p < PERIODS.length; p++) {
           for (let d = 0; d < DAYS.length; d++) {
-            const targetClass = teacherTemplate[p][d];
+            const templateCell = teacherTemplate[p][d] || createTemplateCell();
+            const targetClass = templateCell.className;
             if (!targetClass) continue;
 
             if (!allowedClassNames.has(targetClass)) {
@@ -441,7 +480,7 @@ export default function TimetableApp() {
               type: 'special',
               teacher: teacher.name,
               teacherId: teacher.id,
-              location: getDefaultLocation(teacher.subject, d, p),
+              location: (templateCell.location || '').trim() || getDefaultLocation(teacher.subject, d, p),
               id: `${targetClass}-${p}-${d}-special`
             };
           }
@@ -799,7 +838,7 @@ export default function TimetableApp() {
 
   const getCompactCellStyles = (className, p, d, cell) => {
     const isSelected = selectedCell?.weekName === currentWeekName && selectedCell?.className === className && selectedCell?.p === p && selectedCell?.d === d;
-    let baseStyle = 'relative transition-all duration-150 ease-in-out border border-gray-300 p-1 h-14 flex flex-col items-center justify-center cursor-pointer rounded ';
+    let baseStyle = 'relative transition-all duration-150 ease-in-out border border-gray-300 p-1 h-[60px] flex flex-col items-center justify-center cursor-pointer rounded ';
     baseStyle += getSubjectColor(cell.subject) + ' ';
 
     if (isSelected) baseStyle += 'ring-2 ring-yellow-400 scale-[1.03] z-20 shadow ';
@@ -816,6 +855,45 @@ export default function TimetableApp() {
     }
 
     return { style: baseStyle, overlay };
+  };
+
+  const getCompactScaleRatio = () => compactTextScalePercent / 100;
+
+  const getFittedTextPx = (text, options = {}) => {
+    const {
+      baseWidthPx = 58,
+      maxHeightPx = 18,
+      minPx = 8,
+      maxPx = 24
+    } = options;
+
+    const safe = String(text || '-');
+    const length = Math.max(safe.length, 1);
+    const widthBased = baseWidthPx / (length * 0.92 + 0.35);
+    const autoSize = Math.min(widthBased, maxHeightPx);
+    const scaled = autoSize * getCompactScaleRatio();
+
+    return Math.max(minPx, Math.min(maxPx, scaled));
+  };
+
+  const getCompactSubjectTextStyle = (subject, hasTeacherLine) => {
+    const px = getFittedTextPx(subject || '-', {
+      baseWidthPx: 58,
+      maxHeightPx: hasTeacherLine ? 13.5 : 21,
+      minPx: 8,
+      maxPx: 26
+    });
+    return { fontSize: `${px.toFixed(1)}px`, lineHeight: 1.08 };
+  };
+
+  const getCompactTeacherTextStyle = (teacher) => {
+    const px = getFittedTextPx(teacher || '-', {
+      baseWidthPx: 58,
+      maxHeightPx: 11.5,
+      minPx: 7,
+      maxPx: 15
+    });
+    return { fontSize: `${px.toFixed(1)}px`, lineHeight: 1.05 };
   };
 
   // --- 집계 로직 (전체 학급 교과 시수) ---
@@ -841,8 +919,8 @@ export default function TimetableApp() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-100 p-2 md:p-6 font-sans">
-      <div className="max-w-[1400px] mx-auto">
+    <div className={`min-h-screen bg-slate-100 font-sans ${isWeeklyAllView ? 'p-2 md:p-3' : 'p-2 md:p-6'}`}>
+      <div className={`${isWeeklyAllView ? 'w-full' : 'max-w-[1400px]'} mx-auto`}>
         
         {/* 헤더 & 탭 스위처 */}
         <div className="bg-white rounded-2xl shadow-sm p-4 md:p-6 mb-6 border border-gray-200">
@@ -914,6 +992,26 @@ export default function TimetableApp() {
                     전체 학급
                   </button>
                 </div>
+                {weeklyLayoutMode === 'all' && (
+                  <div className="flex items-center gap-2 bg-white border border-gray-200 rounded-lg px-2 py-1.5">
+                    <span className="text-xs font-bold text-gray-500 whitespace-nowrap">텍스트 크기</span>
+                    <input
+                      type="range"
+                      min={70}
+                      max={180}
+                      value={compactTextScalePercent}
+                      onChange={(e) => setCompactTextScalePercent(Number(e.target.value))}
+                      className="w-28 accent-blue-600"
+                    />
+                    <button
+                      onClick={() => setCompactTextScalePercent(100)}
+                      className="text-[11px] px-2 py-1 rounded border border-gray-300 bg-gray-50 text-gray-600 hover:bg-gray-100"
+                    >
+                      기본
+                    </button>
+                    <span className="text-xs font-bold text-blue-700 w-10 text-right">{compactTextScalePercent}%</span>
+                  </div>
+                )}
                 <button onClick={applyToFutureWeeks} className="flex justify-center items-center gap-1 px-3 py-2 bg-indigo-50 border border-indigo-200 text-indigo-700 rounded-lg hover:bg-indigo-100 text-sm font-bold whitespace-nowrap shadow-sm">
                   <Copy size={16} /> 이후 덮어쓰기 (현재 반)
                 </button>
@@ -1060,42 +1158,54 @@ export default function TimetableApp() {
               <h2 className="text-xl font-bold text-gray-800">
                 <span className="text-blue-600">[{currentWeekName}]</span> 전체 학급 주간 시간표
               </h2>
-              <p className="text-xs text-gray-500">각 학급의 주간표를 축소해서 한 화면에 배치했습니다. 칸 클릭으로 교환/편집 가능합니다.</p>
+              <p className="text-xs text-gray-500">각 학급 주간표를 전체 화면에 배치했습니다. 셀 텍스트는 자동으로 크게 맞춰지며 상단 슬라이더로 추가 조정할 수 있습니다.</p>
             </div>
-            <div className="p-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+            <div className="p-3 md:p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
               {CLASSES.map((cls) => (
                 <div key={cls} className={`border rounded-xl overflow-hidden ${currentClass === cls ? 'border-blue-300 ring-2 ring-blue-100' : 'border-gray-200'}`}>
-                  <div className="px-3 py-2 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
+                  <div className="px-2.5 py-2 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
                     <button onClick={() => setCurrentClass(cls)} className="font-bold text-sm text-gray-800 hover:text-blue-600">
                       {cls}
                     </button>
                     {currentClass === cls && <span className="text-[10px] px-2 py-0.5 rounded bg-blue-100 text-blue-700 font-bold">기준 학급</span>}
                   </div>
-                  <div className="p-2 overflow-x-auto">
-                    <table className="w-full border-collapse text-[10px] min-w-[280px]">
+                  <div className="p-1.5">
+                    <table className="w-full table-fixed border-collapse min-w-full">
                       <thead>
                         <tr>
-                          <th className="w-8 p-1 text-gray-400 font-medium"></th>
+                          <th className="w-7 p-1 text-gray-400 font-medium text-[10px]"></th>
                           {DAYS.map((day) => (
-                            <th key={`${cls}-${day}`} className="p-1 font-bold text-gray-600 bg-gray-50 border-b border-gray-200">{day}</th>
+                            <th
+                              key={`${cls}-${day}`}
+                              className="p-1 font-bold text-gray-600 bg-gray-50 border-b border-gray-200"
+                              style={{ fontSize: `${Math.max(9, Math.min(14, 11 * getCompactScaleRatio())).toFixed(1)}px` }}
+                            >
+                              {day}
+                            </th>
                           ))}
                         </tr>
                       </thead>
                       <tbody>
                         {PERIODS.map((period, pIndex) => (
                           <tr key={`${cls}-${period}`}>
-                            <td className="text-center font-bold text-gray-400 border-r border-gray-100 bg-gray-50/60">{period}</td>
+                            <td
+                              className="text-center font-bold text-gray-400 border-r border-gray-100 bg-gray-50/60"
+                              style={{ fontSize: `${Math.max(8, Math.min(13, 10 * getCompactScaleRatio())).toFixed(1)}px` }}
+                            >
+                              {period}
+                            </td>
                             {DAYS.map((_, dIndex) => {
                               const cell = schedules[cls][pIndex][dIndex];
                               const { style, overlay } = getCompactCellStyles(cls, pIndex, dIndex, cell);
+                              const hasTeacherLine = cell.type === 'special' && Boolean(cell.teacher);
                               return (
                                 <td key={`${cls}-${pIndex}-${dIndex}`} className="p-0.5 align-middle">
                                   <div onClick={() => { setCurrentClass(cls); handleUniversalCellClick(currentWeekName, cls, pIndex, dIndex); }} className={style}>
-                                    <span className="text-[10px] leading-tight font-semibold text-gray-800">
+                                    <span className="leading-tight font-semibold text-gray-800" style={getCompactSubjectTextStyle(cell.subject || '-', hasTeacherLine)}>
                                       {cell.subject || '-'}
                                     </span>
                                     {cell.type === 'special' && cell.teacher && (
-                                      <span className="text-[9px] leading-tight text-gray-700 truncate max-w-full">{cell.teacher}</span>
+                                      <span className="leading-tight text-gray-700 truncate max-w-full" style={getCompactTeacherTextStyle(cell.teacher)}>{cell.teacher}</span>
                                     )}
                                     {overlay}
                                   </div>
@@ -1502,7 +1612,7 @@ export default function TimetableApp() {
                                 {DAYS.map((_, dIndex) => (
                                   <td key={`tpl-cell-${pIndex}-${dIndex}`} className="border border-gray-200 p-1">
                                     <select
-                                      value={selectedTeacherTemplate[pIndex][dIndex]}
+                                      value={selectedTeacherTemplate[pIndex][dIndex].className}
                                       onChange={(e) => updateTemplateCell(selectedTemplateTeacher.id, pIndex, dIndex, e.target.value)}
                                       className="w-full border border-gray-200 rounded px-2 py-1.5 bg-white text-xs focus:outline-none focus:ring-2 focus:ring-indigo-400"
                                     >
@@ -1516,12 +1626,23 @@ export default function TimetableApp() {
                                         );
                                       })}
                                     </select>
+                                    <input
+                                      type="text"
+                                      value={selectedTeacherTemplate[pIndex][dIndex].location}
+                                      onChange={(e) => updateTemplateLocation(selectedTemplateTeacher.id, pIndex, dIndex, e.target.value)}
+                                      placeholder="비고/장소"
+                                      disabled={!selectedTeacherTemplate[pIndex][dIndex].className}
+                                      className="mt-1 w-full border border-gray-200 rounded px-2 py-1 text-[11px] focus:outline-none focus:ring-2 focus:ring-indigo-300 disabled:bg-gray-100 disabled:text-gray-400"
+                                    />
                                   </td>
                                 ))}
                               </tr>
                             ))}
                           </tbody>
                         </table>
+                        <p className="mt-2 text-[11px] text-gray-500">
+                          ※ 학급을 선택한 칸에서 비고/장소를 입력하면 배정 시 해당 값이 우선 적용됩니다.
+                        </p>
                       </div>
                     )}
                   </>
