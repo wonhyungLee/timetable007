@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { AlertCircle, CheckCircle, Info, CalendarSync, X, ChevronLeft, ChevronRight, Copy, LayoutDashboard, CalendarDays, Calculator, MapPin, Settings, Trash2, Edit2, BookOpen, Coffee, Plus, Save } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from './lib/supabaseClient';
 
@@ -264,7 +264,9 @@ export default function TimetableApp() {
 
   const [viewMode, setViewMode] = useState('weekly'); // weekly, monthly, class_summary, teacher_summary, settings
   const [weeklyLayoutMode, setWeeklyLayoutMode] = useState('single'); // single, all
+  const [monthlyLayoutMode, setMonthlyLayoutMode] = useState('class_weekly'); // matrix, class_weekly
   const [compactTextScalePercent, setCompactTextScalePercent] = useState(100);
+  const [monthlyTextScalePercent, setMonthlyTextScalePercent] = useState(100);
   const [currentWeekIndex, setCurrentWeekIndex] = useState(0);
   const [currentClass, setCurrentClass] = useState('1반');
   const [selectedCell, setSelectedCell] = useState(null);
@@ -291,12 +293,55 @@ export default function TimetableApp() {
   
   const currentWeekName = WEEKS[currentWeekIndex];
   const schedules = allSchedules[currentWeekName];
+  const normalizedSpecialTemplates = useMemo(
+    () => normalizeSpecialTemplates(teacherConfigs, specialTemplates),
+    [teacherConfigs, specialTemplates]
+  );
   const selectedTemplateTeacher = teacherConfigs.find((teacher) => teacher.id === selectedTemplateTeacherId) || null;
   const selectedTeacherTemplate = selectedTemplateTeacher
-    ? (specialTemplates[selectedTemplateTeacher.id] || createEmptyTeacherTemplate())
+    ? (normalizedSpecialTemplates[selectedTemplateTeacher.id] || createEmptyTeacherTemplate())
     : createEmptyTeacherTemplate();
   const isWeeklyAllView = viewMode === 'weekly' && weeklyLayoutMode === 'all';
+  const isMonthlyClassWeeklyView = viewMode === 'monthly' && monthlyLayoutMode === 'class_weekly';
+  const isWideContentMode = isWeeklyAllView || isMonthlyClassWeeklyView;
   const hasTeacherHighlightFilter = highlightTeacherIds.length > 0;
+  const templateExpectationMap = useMemo(() => {
+    const map = {};
+    CLASSES.forEach((className) => {
+      map[className] = Array.from({ length: PERIODS.length }, () =>
+        Array.from({ length: DAYS.length }, () => null)
+      );
+    });
+
+    teacherConfigs.forEach((teacher) => {
+      const template = normalizedSpecialTemplates[teacher.id] || createEmptyTeacherTemplate();
+      for (let p = 0; p < PERIODS.length; p++) {
+        for (let d = 0; d < DAYS.length; d++) {
+          const templateCell = template[p][d] || createTemplateCell();
+          const className = templateCell.className;
+          if (!className || !map[className]) continue;
+
+          const expected = {
+            teacherId: teacher.id,
+            teacher: teacher.name,
+            subject: teacher.subject,
+            location: ((templateCell.location || '').trim() || getDefaultLocation(teacher.subject, d, p) || '').trim()
+          };
+
+          const prev = map[className][p][d];
+          if (!prev) {
+            map[className][p][d] = expected;
+          } else if (Array.isArray(prev)) {
+            map[className][p][d] = [...prev, expected];
+          } else {
+            map[className][p][d] = [prev, expected];
+          }
+        }
+      }
+    });
+
+    return map;
+  }, [teacherConfigs, normalizedSpecialTemplates]);
 
   useEffect(() => {
     if (toast.show) {
@@ -829,6 +874,10 @@ export default function TimetableApp() {
     
     baseStyle += getSubjectColor(cell.subject) + " ";
 
+    if (isCellMismatchedWithTemplate(currentClass, p, d, cell)) {
+      baseStyle += "border-red-500 border-2 ";
+    }
+
     if (isSelected) baseStyle += "ring-4 ring-yellow-400 transform scale-105 z-10 shadow-lg ";
 
     let overlay = null;
@@ -844,10 +893,36 @@ export default function TimetableApp() {
     return { style: baseStyle, overlay };
   };
 
+  const isCellMismatchedWithTemplate = (className, periodIndex, dayIndex, cell) => {
+    const expected = templateExpectationMap[className]?.[periodIndex]?.[dayIndex] ?? null;
+    const actual = cell || { subject: '', type: 'empty', teacherId: null, location: '' };
+
+    // 템플릿에 동일 슬롯의 기대값이 2개 이상이면 템플릿 자체 충돌로 간주
+    if (Array.isArray(expected)) return true;
+
+    if (!expected) {
+      return actual.type === 'special';
+    }
+
+    if (actual.type !== 'special') return true;
+    if (actual.teacherId !== expected.teacherId) return true;
+    if ((actual.subject || '') !== expected.subject) return true;
+
+    const actualLocation = (actual.location || '').trim();
+    const expectedLocation = (expected.location || '').trim();
+    if (actualLocation !== expectedLocation) return true;
+
+    return false;
+  };
+
   const getCompactCellStyles = (className, p, d, cell) => {
     const isSelected = selectedCell?.weekName === currentWeekName && selectedCell?.className === className && selectedCell?.p === p && selectedCell?.d === d;
     let baseStyle = 'relative transition-all duration-150 ease-in-out border border-gray-300 p-1 h-[60px] flex flex-col items-center justify-center cursor-pointer rounded ';
     baseStyle += getSubjectColor(cell.subject) + ' ';
+
+    if (isCellMismatchedWithTemplate(className, p, d, cell)) {
+      baseStyle += 'border-red-500 border-2 ';
+    }
 
     if (isSelected) baseStyle += 'ring-2 ring-yellow-400 scale-[1.03] z-20 shadow ';
 
@@ -904,6 +979,79 @@ export default function TimetableApp() {
     return { fontSize: `${px.toFixed(1)}px`, lineHeight: 1.05 };
   };
 
+  const getMonthlyScaleRatio = () => monthlyTextScalePercent / 100;
+
+  const getMonthlyFittedTextPx = (text, options = {}) => {
+    const {
+      baseWidthPx = 100,
+      maxHeightPx = 20,
+      minPx = 9,
+      maxPx = 26
+    } = options;
+
+    const safe = String(text || '-');
+    const length = Math.max(safe.length, 1);
+    const widthBased = baseWidthPx / (length * 0.92 + 0.35);
+    const autoSize = Math.min(widthBased, maxHeightPx);
+    const scaled = autoSize * getMonthlyScaleRatio();
+
+    return Math.max(minPx, Math.min(maxPx, scaled));
+  };
+
+  const getMonthlyClassSubjectTextStyle = (subject, hasTeacherLine) => {
+    const px = getMonthlyFittedTextPx(subject || '-', {
+      baseWidthPx: 100,
+      maxHeightPx: hasTeacherLine ? 15 : 24,
+      minPx: 9,
+      maxPx: 28
+    });
+    return { fontSize: `${px.toFixed(1)}px`, lineHeight: 1.08 };
+  };
+
+  const getMonthlyClassTeacherTextStyle = (teacher) => {
+    const px = getMonthlyFittedTextPx(teacher || '-', {
+      baseWidthPx: 100,
+      maxHeightPx: 12,
+      minPx: 8,
+      maxPx: 16
+    });
+    return { fontSize: `${px.toFixed(1)}px`, lineHeight: 1.05 };
+  };
+
+  const getMonthlyClassLocationTextStyle = (location) => {
+    const px = getMonthlyFittedTextPx(location || '-', {
+      baseWidthPx: 100,
+      maxHeightPx: 11,
+      minPx: 7,
+      maxPx: 14
+    });
+    return { fontSize: `${px.toFixed(1)}px`, lineHeight: 1.05 };
+  };
+
+  const getMonthlyClassCellStyles = (weekName, className, p, d, cell) => {
+    const isSelected = selectedCell?.weekName === weekName && selectedCell?.className === className && selectedCell?.p === p && selectedCell?.d === d;
+    let baseStyle = 'relative transition-all duration-150 ease-in-out border border-gray-300 p-1 h-[78px] flex flex-col items-center justify-center cursor-pointer rounded ';
+    baseStyle += getSubjectColor(cell.subject) + ' ';
+
+    if (isCellMismatchedWithTemplate(className, p, d, cell)) {
+      baseStyle += 'border-red-500 border-2 ';
+    }
+    if (isSelected) baseStyle += 'ring-2 ring-yellow-400 scale-[1.02] z-20 shadow ';
+
+    let overlay = null;
+    if (selectedCell && !isSelected) {
+      const validation = isSwapValid(selectedCell, weekName, className, p, d);
+      if (!validation.valid) {
+        baseStyle += 'opacity-50 cursor-not-allowed ';
+        overlay = <div className="absolute inset-0 bg-red-500/20 flex items-center justify-center z-20"><X className="text-red-600 w-4 h-4 opacity-70" /></div>;
+      } else {
+        baseStyle += 'hover:ring-2 hover:ring-blue-300 hover:scale-[1.01] ';
+      }
+    }
+
+    return { style: baseStyle, overlay };
+  };
+
   // --- 집계 로직 (전체 학급 교과 시수) ---
   const calculateAllClassesSummary = () => {
     const counts = {};
@@ -927,8 +1075,8 @@ export default function TimetableApp() {
   };
 
   return (
-    <div className={`min-h-screen bg-slate-100 font-sans ${isWeeklyAllView ? 'p-2 md:p-3' : 'p-2 md:p-6'}`}>
-      <div className={`${isWeeklyAllView ? 'w-full' : 'max-w-[1400px]'} mx-auto`}>
+    <div className={`min-h-screen bg-slate-100 font-sans ${isWideContentMode ? 'p-2 md:p-3' : 'p-2 md:p-6'}`}>
+      <div className={`${isWideContentMode ? 'w-full' : 'max-w-[1400px]'} mx-auto`}>
         
         {/* 헤더 & 탭 스위처 */}
         <div className="bg-white rounded-2xl shadow-sm p-4 md:p-6 mb-6 border border-gray-200">
@@ -1029,23 +1177,65 @@ export default function TimetableApp() {
           
           {/* 서브 컨트롤러 (Monthly) */}
           {viewMode === 'monthly' && (
-            <div className="flex flex-col md:flex-row justify-between items-center gap-4">
-              <div className="flex items-center gap-2 bg-indigo-50 p-2 rounded-xl border border-indigo-100">
-                <button onClick={() => setCurrentMonthIndex(Math.max(0, currentMonthIndex - 1))} disabled={currentMonthIndex === 0} className="p-2 rounded-lg hover:bg-white disabled:opacity-30 text-indigo-700"><ChevronLeft className="w-5 h-5" /></button>
-                <select value={currentMonthIndex} onChange={(e) => setCurrentMonthIndex(Number(e.target.value))} className="bg-transparent text-lg font-bold text-indigo-900 outline-none cursor-pointer px-4 text-center">
-                  {MONTHS.map((month, idx) => <option key={idx} value={idx}>{month.name}</option>)}
-                </select>
-                <button onClick={() => setCurrentMonthIndex(Math.min(MONTHS.length - 1, currentMonthIndex + 1))} disabled={currentMonthIndex === MONTHS.length - 1} className="p-2 rounded-lg hover:bg-white disabled:opacity-30 text-indigo-700"><ChevronRight className="w-5 h-5" /></button>
-              </div>
-              <div className="flex flex-wrap items-center gap-2 text-sm bg-white p-2 border border-gray-200 rounded-lg shadow-sm">
-                <span className="font-semibold text-gray-600 mr-2"><LayoutDashboard size={14} className="inline"/> 동선 하이라이트(복수 선택):</span>
-                <button onClick={() => setHighlightTeacherIds([])} className={`px-2 py-1 rounded ${!hasTeacherHighlightFilter ? 'bg-gray-800 text-white' : 'bg-gray-100'}`}>전체보기</button>
-                {teacherConfigs.map(teacher => (
-                  <button key={teacher.id} onClick={() => toggleHighlightTeacher(teacher.id)} className={`px-2 py-1 rounded border transition-all ${highlightTeacherIds.includes(teacher.id) ? 'bg-yellow-300 border-yellow-500 text-black font-bold ring-2 ring-yellow-400' : 'bg-white text-gray-600 border-gray-200'}`}>
-                    {teacher.name}({teacher.subject})
+            <div className="flex flex-col gap-3">
+              <div className="flex flex-col lg:flex-row lg:justify-between lg:items-center gap-3">
+                <div className="flex items-center gap-2 bg-indigo-50 p-2 rounded-xl border border-indigo-100">
+                  <button onClick={() => setCurrentMonthIndex(Math.max(0, currentMonthIndex - 1))} disabled={currentMonthIndex === 0} className="p-2 rounded-lg hover:bg-white disabled:opacity-30 text-indigo-700"><ChevronLeft className="w-5 h-5" /></button>
+                  <select value={currentMonthIndex} onChange={(e) => setCurrentMonthIndex(Number(e.target.value))} className="bg-transparent text-lg font-bold text-indigo-900 outline-none cursor-pointer px-4 text-center">
+                    {MONTHS.map((month, idx) => <option key={idx} value={idx}>{month.name}</option>)}
+                  </select>
+                  <button onClick={() => setCurrentMonthIndex(Math.min(MONTHS.length - 1, currentMonthIndex + 1))} disabled={currentMonthIndex === MONTHS.length - 1} className="p-2 rounded-lg hover:bg-white disabled:opacity-30 text-indigo-700"><ChevronRight className="w-5 h-5" /></button>
+                </div>
+
+                <div className="flex bg-indigo-100 p-1 rounded-lg">
+                  <button onClick={() => setMonthlyLayoutMode('matrix')} className={`px-3 py-1.5 text-xs rounded-md font-bold ${monthlyLayoutMode === 'matrix' ? 'bg-white text-indigo-700 shadow-sm' : 'text-indigo-500'}`}>
+                    종합표
                   </button>
-                ))}
+                  <button onClick={() => setMonthlyLayoutMode('class_weekly')} className={`px-3 py-1.5 text-xs rounded-md font-bold ${monthlyLayoutMode === 'class_weekly' ? 'bg-white text-indigo-700 shadow-sm' : 'text-indigo-500'}`}>
+                    학급별 주간표
+                  </button>
+                </div>
               </div>
+
+              {monthlyLayoutMode === 'matrix' ? (
+                <div className="flex flex-wrap items-center gap-2 text-sm bg-white p-2 border border-gray-200 rounded-lg shadow-sm">
+                  <span className="font-semibold text-gray-600 mr-2"><LayoutDashboard size={14} className="inline"/> 동선 하이라이트(복수 선택):</span>
+                  <button onClick={() => setHighlightTeacherIds([])} className={`px-2 py-1 rounded ${!hasTeacherHighlightFilter ? 'bg-gray-800 text-white' : 'bg-gray-100'}`}>전체보기</button>
+                  {teacherConfigs.map(teacher => (
+                    <button key={teacher.id} onClick={() => toggleHighlightTeacher(teacher.id)} className={`px-2 py-1 rounded border transition-all ${highlightTeacherIds.includes(teacher.id) ? 'bg-yellow-300 border-yellow-500 text-black font-bold ring-2 ring-yellow-400' : 'bg-white text-gray-600 border-gray-200'}`}>
+                      {teacher.name}({teacher.subject})
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="flex flex-col lg:flex-row lg:justify-between lg:items-center gap-3 bg-white p-2 border border-gray-200 rounded-lg shadow-sm">
+                  <div className="flex flex-wrap gap-1 bg-gray-100 p-1.5 rounded-lg">
+                    {CLASSES.map((cls) => (
+                      <button key={`monthly-class-${cls}`} onClick={() => setCurrentClass(cls)} className={`px-2 py-1.5 text-xs rounded-md font-semibold transition-colors ${currentClass === cls ? 'bg-white text-indigo-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
+                        {cls}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex items-center gap-2 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1.5">
+                    <span className="text-xs font-bold text-indigo-600 whitespace-nowrap">텍스트 크기</span>
+                    <input
+                      type="range"
+                      min={70}
+                      max={180}
+                      value={monthlyTextScalePercent}
+                      onChange={(e) => setMonthlyTextScalePercent(Number(e.target.value))}
+                      className="w-28 accent-indigo-600"
+                    />
+                    <button
+                      onClick={() => setMonthlyTextScalePercent(100)}
+                      className="text-[11px] px-2 py-1 rounded border border-indigo-200 bg-white text-indigo-600 hover:bg-indigo-100"
+                    >
+                      기본
+                    </button>
+                    <span className="text-xs font-bold text-indigo-700 w-10 text-right">{monthlyTextScalePercent}%</span>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1166,7 +1356,7 @@ export default function TimetableApp() {
               <h2 className="text-xl font-bold text-gray-800">
                 <span className="text-blue-600">[{currentWeekName}]</span> 전체 학급 주간 시간표
               </h2>
-              <p className="text-xs text-gray-500">각 학급 주간표를 전체 화면에 배치했습니다. 셀 텍스트는 자동으로 크게 맞춰지며 상단 슬라이더로 추가 조정할 수 있습니다.</p>
+              <p className="text-xs text-gray-500">각 학급 주간표를 전체 화면에 배치했습니다. 템플릿과 다른 칸은 빨간 테두리로 표시되며 텍스트 크기는 상단 슬라이더로 조정할 수 있습니다.</p>
             </div>
             <div className="p-3 md:p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
               {CLASSES.map((cls) => (
@@ -1231,12 +1421,12 @@ export default function TimetableApp() {
           </div>
         )}
 
-        {viewMode === 'monthly' && (
+        {viewMode === 'monthly' && monthlyLayoutMode === 'matrix' && (
           <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden flex flex-col h-[75vh]">
             <div className="bg-indigo-50 border-b border-indigo-100 p-3 flex justify-between items-center shrink-0">
               <div className="flex items-center gap-2">
                 <Info className="text-indigo-500" size={18} />
-                <span className="text-sm text-indigo-800 font-medium">월간 조망 화면에서는 <strong>다른 학급의 전담 수업과도 자유롭게 교환</strong>할 수 있습니다! 빈칸을 클릭해 과목을 추가할 수도 있습니다.</span>
+                <span className="text-sm text-indigo-800 font-medium">월간 조망 화면에서는 <strong>다른 학급의 전담 수업과도 자유롭게 교환</strong>할 수 있습니다! 템플릿과 다른 칸은 빨간 테두리로 표시됩니다.</span>
               </div>
             </div>
             <div className="overflow-auto flex-1 relative">
@@ -1274,10 +1464,12 @@ export default function TimetableApp() {
                               const isSpecial = cell.type !== 'homeroom' && cell.type !== 'empty' && cell.type !== 'holiday';
                               const isHighlighted = hasTeacherHighlightFilter && cell.teacherId && highlightTeacherIds.includes(cell.teacherId);
                               const isDimmed = hasTeacherHighlightFilter && !isHighlighted;
+                              const isTemplateMismatch = isCellMismatchedWithTemplate(cls, pIdx, dIdx, cell);
                               const isSelected = selectedCell?.weekName === weekName && selectedCell?.className === cls && selectedCell?.p === pIdx && selectedCell?.d === dIdx;
                               
                               let cellClass = `border border-gray-200 p-1 text-center h-14 relative cursor-pointer transition-all ${isDimmed ? 'opacity-20 grayscale ' : ''} ${isHighlighted ? 'ring-2 ring-inset ring-red-500 font-bold transform scale-105 z-10 shadow-md ' : ''}`;
                               cellClass += getSubjectColor(cell.subject) + " ";
+                              if (isTemplateMismatch) cellClass += "border-red-500 border-2 ";
 
                               if (isSelected) cellClass += "ring-4 ring-yellow-400 transform scale-105 z-20 shadow-lg ";
 
@@ -1310,6 +1502,87 @@ export default function TimetableApp() {
                   })}
                 </tbody>
               </table>
+            </div>
+          </div>
+        )}
+
+        {viewMode === 'monthly' && monthlyLayoutMode === 'class_weekly' && (
+          <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+            <div className="bg-indigo-50 border-b border-indigo-100 p-3 flex justify-between items-center">
+              <div className="flex items-center gap-2">
+                <Info className="text-indigo-500" size={18} />
+                <span className="text-sm text-indigo-800 font-medium">{currentClass} 월간 주차별 시간표입니다. 템플릿과 다른 칸은 빨간 테두리로 표시됩니다.</span>
+              </div>
+            </div>
+            <div className="p-3 md:p-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+              {MONTHS[currentMonthIndex].weekIndices.map((weekIdx) => {
+                const weekName = WEEKS[weekIdx];
+                const weekClassSchedule = allSchedules[weekName]?.[currentClass];
+                const dayHeaders = getDatesForWeek(weekName);
+
+                if (!weekClassSchedule) return null;
+
+                return (
+                  <div key={`monthly-class-card-${weekName}-${currentClass}`} className="border border-indigo-200 rounded-xl overflow-hidden">
+                    <div className="px-3 py-2 bg-indigo-100 border-b border-indigo-200">
+                      <p className="text-xs font-bold text-indigo-900 truncate">{weekName}</p>
+                    </div>
+                    <div className="p-1.5">
+                      <table className="w-full table-fixed border-collapse min-w-full">
+                        <thead>
+                          <tr>
+                            <th className="w-7 p-1 text-gray-400 font-medium text-[10px]"></th>
+                            {dayHeaders.map((dayLabel) => (
+                              <th
+                                key={`monthly-class-head-${weekName}-${dayLabel}`}
+                                className="p-1 font-bold text-gray-600 bg-gray-50 border-b border-gray-200"
+                                style={{ fontSize: `${Math.max(9, Math.min(14, 11 * getMonthlyScaleRatio())).toFixed(1)}px` }}
+                              >
+                                {dayLabel.replace('요일', '')}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {PERIODS.map((period, pIdx) => (
+                            <tr key={`monthly-class-row-${weekName}-${period}`}>
+                              <td
+                                className="text-center font-bold text-gray-400 border-r border-gray-100 bg-gray-50/60"
+                                style={{ fontSize: `${Math.max(8, Math.min(13, 10 * getMonthlyScaleRatio())).toFixed(1)}px` }}
+                              >
+                                {period}
+                              </td>
+                              {DAYS.map((_, dIdx) => {
+                                const cell = weekClassSchedule[pIdx][dIdx];
+                                const { style, overlay } = getMonthlyClassCellStyles(weekName, currentClass, pIdx, dIdx, cell);
+                                const hasTeacherLine = cell.type === 'special' && Boolean(cell.teacher);
+                                return (
+                                  <td key={`monthly-class-cell-${weekName}-${pIdx}-${dIdx}`} className="p-0.5 align-middle">
+                                    <div onClick={() => handleUniversalCellClick(weekName, currentClass, pIdx, dIdx)} className={style}>
+                                      <span className="leading-tight font-semibold text-gray-800" style={getMonthlyClassSubjectTextStyle(cell.subject || '-', hasTeacherLine)}>
+                                        {cell.subject || '-'}
+                                      </span>
+                                      {cell.type === 'special' && cell.teacher && (
+                                        <span className="leading-tight text-gray-700 truncate max-w-full" style={getMonthlyClassTeacherTextStyle(cell.teacher)}>{cell.teacher}</span>
+                                      )}
+                                      {cell.location && (
+                                        <span className="leading-tight text-gray-600 truncate max-w-full px-0.5" style={getMonthlyClassLocationTextStyle(cell.location)}>
+                                          {cell.location}
+                                        </span>
+                                      )}
+                                      {overlay}
+                                    </div>
+                                  </td>
+                                );
+                              })}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}
