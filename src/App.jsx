@@ -91,7 +91,7 @@ const getSubjectColor = (subject) => {
   const colors = {
     '체육': 'bg-[#00c853]', '영어': 'bg-[#00e5ff]',
     '과학': 'bg-[#b388ff]', '음악': 'bg-[#ff8a80]',
-    '미술': 'bg-[#f48fb1]', '실과': 'bg-[#ffb300]'
+    '실과': 'bg-[#ffb300]'
   };
   return colors[subject] || 'bg-white text-gray-700'; // 담임 과목은 기본 흰색
 };
@@ -269,7 +269,7 @@ export default function TimetableApp() {
   const [currentClass, setCurrentClass] = useState('1반');
   const [selectedCell, setSelectedCell] = useState(null);
   const [currentMonthIndex, setCurrentMonthIndex] = useState(0);
-  const [highlightTeacherId, setHighlightTeacherId] = useState(null);
+  const [highlightTeacherIds, setHighlightTeacherIds] = useState([]);
   const [toast, setToast] = useState({ show: false, message: '', type: '' });
   const [editingTeacherId, setEditingTeacherId] = useState(null);
   const [teacherForm, setTeacherForm] = useState({
@@ -296,6 +296,7 @@ export default function TimetableApp() {
     ? (specialTemplates[selectedTemplateTeacher.id] || createEmptyTeacherTemplate())
     : createEmptyTeacherTemplate();
   const isWeeklyAllView = viewMode === 'weekly' && weeklyLayoutMode === 'all';
+  const hasTeacherHighlightFilter = highlightTeacherIds.length > 0;
 
   useEffect(() => {
     if (toast.show) {
@@ -386,8 +387,15 @@ export default function TimetableApp() {
 
     setTeacherConfigs((prev) => prev.filter((item) => item.id !== teacher.id));
     if (editingTeacherId === teacher.id) resetTeacherForm();
-    if (highlightTeacherId === teacher.id) setHighlightTeacherId(null);
+    setHighlightTeacherIds((prev) => prev.filter((id) => id !== teacher.id));
     showNotification('전담 교사가 삭제되었습니다.', 'success');
+  };
+
+  const toggleHighlightTeacher = (teacherId) => {
+    setHighlightTeacherIds((prev) => {
+      if (prev.includes(teacherId)) return prev.filter((id) => id !== teacherId);
+      return [...prev, teacherId];
+    });
   };
 
   useEffect(() => {
@@ -1030,10 +1038,10 @@ export default function TimetableApp() {
                 <button onClick={() => setCurrentMonthIndex(Math.min(MONTHS.length - 1, currentMonthIndex + 1))} disabled={currentMonthIndex === MONTHS.length - 1} className="p-2 rounded-lg hover:bg-white disabled:opacity-30 text-indigo-700"><ChevronRight className="w-5 h-5" /></button>
               </div>
               <div className="flex flex-wrap items-center gap-2 text-sm bg-white p-2 border border-gray-200 rounded-lg shadow-sm">
-                <span className="font-semibold text-gray-600 mr-2"><LayoutDashboard size={14} className="inline"/> 동선 하이라이트:</span>
-                <button onClick={() => setHighlightTeacherId(null)} className={`px-2 py-1 rounded ${highlightTeacherId === null ? 'bg-gray-800 text-white' : 'bg-gray-100'}`}>전체보기</button>
+                <span className="font-semibold text-gray-600 mr-2"><LayoutDashboard size={14} className="inline"/> 동선 하이라이트(복수 선택):</span>
+                <button onClick={() => setHighlightTeacherIds([])} className={`px-2 py-1 rounded ${!hasTeacherHighlightFilter ? 'bg-gray-800 text-white' : 'bg-gray-100'}`}>전체보기</button>
                 {teacherConfigs.map(teacher => (
-                  <button key={teacher.id} onClick={() => setHighlightTeacherId(teacher.id)} className={`px-2 py-1 rounded border transition-all ${highlightTeacherId === teacher.id ? 'bg-yellow-300 border-yellow-500 text-black font-bold ring-2 ring-yellow-400' : 'bg-white text-gray-600 border-gray-200'}`}>
+                  <button key={teacher.id} onClick={() => toggleHighlightTeacher(teacher.id)} className={`px-2 py-1 rounded border transition-all ${highlightTeacherIds.includes(teacher.id) ? 'bg-yellow-300 border-yellow-500 text-black font-bold ring-2 ring-yellow-400' : 'bg-white text-gray-600 border-gray-200'}`}>
                     {teacher.name}({teacher.subject})
                   </button>
                 ))}
@@ -1264,8 +1272,8 @@ export default function TimetableApp() {
                             {CLASSES.map(cls => {
                               const cell = weekSchedules[cls][pIdx][dIdx];
                               const isSpecial = cell.type !== 'homeroom' && cell.type !== 'empty' && cell.type !== 'holiday';
-                              const isHighlighted = highlightTeacherId && cell.teacherId === highlightTeacherId;
-                              const isDimmed = highlightTeacherId && cell.teacherId !== highlightTeacherId;
+                              const isHighlighted = hasTeacherHighlightFilter && cell.teacherId && highlightTeacherIds.includes(cell.teacherId);
+                              const isDimmed = hasTeacherHighlightFilter && !isHighlighted;
                               const isSelected = selectedCell?.weekName === weekName && selectedCell?.className === cls && selectedCell?.p === pIdx && selectedCell?.d === dIdx;
                               
                               let cellClass = `border border-gray-200 p-1 text-center h-14 relative cursor-pointer transition-all ${isDimmed ? 'opacity-20 grayscale ' : ''} ${isHighlighted ? 'ring-2 ring-inset ring-red-500 font-bold transform scale-105 z-10 shadow-md ' : ''}`;
