@@ -131,6 +131,14 @@ const getSubjectColor = (subject) => {
   return colors[subject] || 'bg-white text-gray-700'; // 담임 과목은 기본 흰색
 };
 
+const getTimetableCellColor = (cell) => {
+  const subject = cell?.subject || '';
+  if (!subject) return getSubjectColor('');
+  if (cell?.type === 'holiday' || subject === '휴업일') return getSubjectColor('휴업일');
+  if (cell?.type !== 'special') return 'bg-white text-gray-700';
+  return getSubjectColor(subject);
+};
+
 const getDefaultLocation = (subject, dayIndex, periodIndex) => {
   if (subject === '과학') return '과학1실';
   if (subject === '체육') {
@@ -1189,7 +1197,7 @@ export default function TimetableApp() {
     const hasTeacherConflict = hasTeacherOverlapConflict(currentWeekName, currentClass, p, d, cell);
     let baseStyle = "relative transition-all duration-200 ease-in-out border border-gray-300 p-2 h-24 flex flex-col items-center justify-center cursor-pointer font-medium text-lg rounded-sm ";
     
-    baseStyle += getSubjectColor(cell.subject) + " ";
+    baseStyle += getTimetableCellColor(cell) + " ";
 
     if (isCellMismatchedWithTemplate(currentClass, p, d, cell) || hasTeacherConflict) {
       baseStyle += "border-red-500 border-2 ";
@@ -1239,7 +1247,7 @@ export default function TimetableApp() {
     const isSelected = selectedCell?.weekName === currentWeekName && selectedCell?.className === className && selectedCell?.p === p && selectedCell?.d === d;
     const hasTeacherConflict = hasTeacherOverlapConflict(currentWeekName, className, p, d, cell);
     let baseStyle = 'relative transition-all duration-150 ease-in-out border border-gray-300 p-1 h-[60px] flex flex-col items-center justify-center cursor-pointer rounded ';
-    baseStyle += getSubjectColor(cell.subject) + ' ';
+    baseStyle += getTimetableCellColor(cell) + ' ';
 
     if (isCellMismatchedWithTemplate(className, p, d, cell) || hasTeacherConflict) {
       baseStyle += 'border-red-500 border-2 ';
@@ -1370,7 +1378,7 @@ export default function TimetableApp() {
     const isSelected = selectedCell?.weekName === weekName && selectedCell?.className === className && selectedCell?.p === p && selectedCell?.d === d;
     const hasTeacherConflict = hasTeacherOverlapConflict(weekName, className, p, d, cell);
     let baseStyle = `relative transition-all duration-150 ease-in-out border border-gray-300 ${dense ? 'p-0.5 h-[52px] rounded-sm' : 'p-1 h-[78px] rounded'} flex flex-col items-center justify-center cursor-pointer `;
-    baseStyle += getSubjectColor(cell.subject) + ' ';
+    baseStyle += getTimetableCellColor(cell) + ' ';
 
     if (isCellMismatchedWithTemplate(className, p, d, cell) || hasTeacherConflict) {
       baseStyle += 'border-red-500 border-2 ';
@@ -1881,7 +1889,7 @@ export default function TimetableApp() {
                               const isSelected = selectedCell?.weekName === weekName && selectedCell?.className === cls && selectedCell?.p === pIdx && selectedCell?.d === dIdx;
                               
                               let cellClass = `border border-gray-200 p-1 text-center h-14 relative cursor-pointer transition-all ${isDimmed ? 'opacity-20 grayscale ' : ''} ${isHighlighted ? 'ring-2 ring-inset ring-red-500 font-bold transform scale-105 z-10 shadow-md ' : ''}`;
-                              cellClass += getSubjectColor(cell.subject) + " ";
+                              cellClass += getTimetableCellColor(cell) + " ";
                               if (isTemplateMismatch || isTeacherConflict) cellClass += "border-red-500 border-2 ";
 
                               if (isSelected) cellClass += "ring-4 ring-yellow-400 transform scale-105 z-20 shadow-lg ";
