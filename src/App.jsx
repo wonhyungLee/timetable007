@@ -432,6 +432,14 @@ const SYNC_DEBOUNCE_MS = 1200;
 const MAX_UNDO_HISTORY = 50;
 const MAX_CHANGE_LOGS = 400;
 
+const cloneSchedulesForHistory = (schedules) => {
+  try {
+    return JSON.parse(JSON.stringify(schedules));
+  } catch (_error) {
+    return schedules;
+  }
+};
+
 // --- [4] 메인 컴포넌트 ---
 export default function TimetableApp() {
   const [teacherConfigs, setTeacherConfigs] = useState(initialTeachers);
@@ -487,6 +495,7 @@ export default function TimetableApp() {
   const clientIdRef = useRef(`client-${Math.random().toString(36).slice(2, 10)}`);
   const panDragRef = useRef(null);
   const contextMenuRef = useRef(null);
+  const baselineSchedulesRef = useRef(null);
   
   const currentWeekName = WEEKS[currentWeekIndex];
   const holidayTargetWeekName = WEEKS[holidayWeekIndex] || WEEKS[0];
@@ -615,7 +624,8 @@ export default function TimetableApp() {
   };
 
   const applyScheduleChangeWithHistory = ({ nextAllSchedules, nextSelectedCell, changeLogEntry }) => {
-    setUndoStack((prev) => [...prev.slice(-(MAX_UNDO_HISTORY - 1)), allSchedules]);
+    const previousSnapshot = cloneSchedulesForHistory(allSchedules);
+    setUndoStack((prev) => [...prev.slice(-(MAX_UNDO_HISTORY - 1)), previousSnapshot]);
     setRedoStack([]);
     setAllSchedules(nextAllSchedules);
     if (nextSelectedCell !== undefined) {
@@ -632,8 +642,11 @@ export default function TimetableApp() {
 
     const previousSchedules = undoStack[undoStack.length - 1];
     setUndoStack((prev) => prev.slice(0, -1));
-    setRedoStack((prev) => [...prev.slice(-(MAX_UNDO_HISTORY - 1)), allSchedules]);
-    setAllSchedules(previousSchedules);
+    setRedoStack((prev) => [
+      ...prev.slice(-(MAX_UNDO_HISTORY - 1)),
+      cloneSchedulesForHistory(allSchedules)
+    ]);
+    setAllSchedules(cloneSchedulesForHistory(previousSchedules));
     setSelectedCell(null);
     appendChangeLog(
       createChangeLogEntry({
@@ -654,8 +667,11 @@ export default function TimetableApp() {
 
     const nextSchedules = redoStack[redoStack.length - 1];
     setRedoStack((prev) => prev.slice(0, -1));
-    setUndoStack((prev) => [...prev.slice(-(MAX_UNDO_HISTORY - 1)), allSchedules]);
-    setAllSchedules(nextSchedules);
+    setUndoStack((prev) => [
+      ...prev.slice(-(MAX_UNDO_HISTORY - 1)),
+      cloneSchedulesForHistory(allSchedules)
+    ]);
+    setAllSchedules(cloneSchedulesForHistory(nextSchedules));
     setSelectedCell(null);
     appendChangeLog(
       createChangeLogEntry({
@@ -747,6 +763,12 @@ export default function TimetableApp() {
       setQuickEditorAction('subject');
     }
   }, [isQuickEditorVisible]);
+
+  useEffect(() => {
+    if (baselineSchedulesRef.current) return;
+    if (isSupabaseConfigured && !isRemoteReadyRef.current) return;
+    baselineSchedulesRef.current = cloneSchedulesForHistory(allSchedules);
+  }, [allSchedules, syncStatus]);
 
   useEffect(() => {
     const stopPanDrag = () => {
@@ -1110,8 +1132,6 @@ export default function TimetableApp() {
       setTeacherConfigs(payloadForSync.teacherConfigs);
       setSpecialTemplates(payloadForSync.specialTemplates);
       setChangeLogs(Array.isArray(payloadForSync.changeLogs) ? payloadForSync.changeLogs : []);
-      setUndoStack([]);
-      setRedoStack([]);
       lastSyncedPayloadRef.current = JSON.stringify(payloadForSync);
       setLastSyncedAt(syncedAt || new Date().toISOString());
       setLastUpdatedBy(updatedBy || null);
@@ -1282,8 +1302,8 @@ export default function TimetableApp() {
   };
 
   const buildTemplateMismatchNotice = (weekName, className, periodIndex, dayIndex, cell) => {
-    if (!isCellMismatchedWithTemplate(className, periodIndex, dayIndex, cell)) return '';
-    return `[안내] [${weekName}] ${DAYS[dayIndex]} ${PERIODS[periodIndex]}교시 ${className} 수업이 전담 템플릿과 달라 파란색 테두리로 표시됩니다.`;
+    if (!isCellMismatchedWithTemplate(weekName, className, periodIndex, dayIndex, cell)) return '';
+    return `[안내] [${weekName}] ${DAYS[dayIndex]} ${PERIODS[periodIndex]}교시 ${className} 수업이 전담 기준 배치(원배치/템플릿)와 달라 파란색 테두리로 표시됩니다.`;
   };
 
   const getTeacherNameById = (teacherId) =>
@@ -2113,7 +2133,7 @@ export default function TimetableApp() {
     const isSelected = selectedCell?.weekName === currentWeekName && selectedCell?.className === currentClass && selectedCell?.p === p && selectedCell?.d === d;
     const hasTeacherConflict = hasTeacherOverlapConflict(currentWeekName, currentClass, p, d, cell);
     const hasForcedConflict = Boolean(cell?.forcedConflict);
-    const hasTemplateMismatch = isCellMismatchedWithTemplate(currentClass, p, d, cell);
+    const hasTemplateMismatch = isCellMismatchedWithTemplate(currentWeekName, currentClass, p, d, cell);
     const swapTargetState = getSwapTargetState(currentWeekName, currentClass, p, d, cell);
     let baseStyle = "relative transition-all duration-200 ease-in-out border border-gray-300 p-2 h-24 flex flex-col items-center justify-center cursor-pointer font-medium text-lg rounded-sm ";
     
@@ -2142,26 +2162,54 @@ export default function TimetableApp() {
     return { style: baseStyle, overlay };
   };
 
-  const isCellMismatchedWithTemplate = (className, periodIndex, dayIndex, cell) => {
-    const expected = templateExpectationMap[className]?.[periodIndex]?.[dayIndex] ?? null;
+  const getSpecialPlacementIdentity = (cell) => {
+    if (!isSpecialLikeCell(cell)) return '';
+    const teacherId = typeof cell.teacherId === 'string' ? cell.teacherId : '';
+    const teacherName = typeof cell.teacher === 'string' ? cell.teacher.trim() : '';
+    const subjectName = typeof cell.subject === 'string' ? cell.subject.trim() : '';
+    return `${teacherId}|${teacherName}|${subjectName}`;
+  };
+
+  const isCellMismatchedWithOriginalSpecialPlacement = (weekName, className, periodIndex, dayIndex, cell) => {
     const actual = cell || { subject: '', type: 'empty', teacherId: null, location: '' };
 
-    // 휴업일은 설정에서 의도적으로 지정한 예외로 간주
     if (actual.type === 'holiday' || actual.subject === '휴업일') return false;
+    // 원배치 비교는 "현재 전담 수업 칸"에 한해서만 적용한다.
+    if (!isSpecialLikeCell(actual)) return false;
+
+    const baselineCell = baselineSchedulesRef.current?.[weekName]?.[className]?.[periodIndex]?.[dayIndex];
+    if (!isSpecialLikeCell(baselineCell)) return true;
+
+    return getSpecialPlacementIdentity(actual) !== getSpecialPlacementIdentity(baselineCell);
+  };
+
+  const isCellMismatchedWithTemplate = (weekName, className, periodIndex, dayIndex, cell) => {
+    const expected = templateExpectationMap[className]?.[periodIndex]?.[dayIndex] ?? null;
+    const actual = cell || { subject: '', type: 'empty', teacherId: null, location: '' };
+    const hasOriginalPlacementMismatch = isCellMismatchedWithOriginalSpecialPlacement(
+      weekName,
+      className,
+      periodIndex,
+      dayIndex,
+      actual
+    );
+
+    // 휴업일은 설정에서 의도적으로 지정한 예외로 간주
+    if (actual.type === 'holiday' || actual.subject === '휴업일') return hasOriginalPlacementMismatch;
 
     // 과학/체육/음악은 담임 수업으로 운용 가능하므로 템플릿 불일치에서 제외
     if (
       actual.type === 'homeroom' &&
       HOMEROOM_FLEX_SUBJECTS.includes((actual.subject || '').trim())
     ) {
-      return false;
+      return hasOriginalPlacementMismatch;
     }
 
     // 템플릿에 동일 슬롯의 기대값이 2개 이상이면 템플릿 자체 충돌로 간주
     if (Array.isArray(expected)) return true;
 
     if (!expected) {
-      return actual.type === 'special';
+      return actual.type === 'special' || hasOriginalPlacementMismatch;
     }
 
     if (actual.type !== 'special') return true;
@@ -2172,14 +2220,14 @@ export default function TimetableApp() {
     const expectedLocation = (expected.location || '').trim();
     if (actualLocation !== expectedLocation) return true;
 
-    return false;
+    return hasOriginalPlacementMismatch;
   };
 
   const getCompactCellStyles = (className, p, d, cell) => {
     const isSelected = selectedCell?.weekName === currentWeekName && selectedCell?.className === className && selectedCell?.p === p && selectedCell?.d === d;
     const hasTeacherConflict = hasTeacherOverlapConflict(currentWeekName, className, p, d, cell);
     const hasForcedConflict = Boolean(cell?.forcedConflict);
-    const hasTemplateMismatch = isCellMismatchedWithTemplate(className, p, d, cell);
+    const hasTemplateMismatch = isCellMismatchedWithTemplate(currentWeekName, className, p, d, cell);
     const swapTargetState = getSwapTargetState(currentWeekName, className, p, d, cell);
     let baseStyle = 'relative transition-all duration-150 ease-in-out border border-gray-300 p-1 h-[60px] flex flex-col items-center justify-center cursor-pointer rounded ';
     baseStyle += getTimetableCellColor(cell) + ' ';
@@ -2317,7 +2365,7 @@ export default function TimetableApp() {
     const isSelected = selectedCell?.weekName === weekName && selectedCell?.className === className && selectedCell?.p === p && selectedCell?.d === d;
     const hasTeacherConflict = hasTeacherOverlapConflict(weekName, className, p, d, cell);
     const hasForcedConflict = Boolean(cell?.forcedConflict);
-    const hasTemplateMismatch = isCellMismatchedWithTemplate(className, p, d, cell);
+    const hasTemplateMismatch = isCellMismatchedWithTemplate(weekName, className, p, d, cell);
     const swapTargetState = getSwapTargetState(weekName, className, p, d, cell);
     let baseStyle = `relative transition-all duration-150 ease-in-out border border-gray-300 ${dense ? 'p-0.5 h-[52px] rounded-sm' : 'p-1 h-[78px] rounded'} flex flex-col items-center justify-center cursor-pointer `;
     baseStyle += getTimetableCellColor(cell) + ' ';
@@ -2667,7 +2715,13 @@ export default function TimetableApp() {
                 <p className="text-xs text-gray-500">{quickEditorActionGuideText}</p>
 
                 {(() => {
-                  const hasMismatch = isCellMismatchedWithTemplate(selectedCell.className, selectedCell.p, selectedCell.d, quickEditorCurrentCell);
+                  const hasMismatch = isCellMismatchedWithTemplate(
+                    selectedCell.weekName,
+                    selectedCell.className,
+                    selectedCell.p,
+                    selectedCell.d,
+                    quickEditorCurrentCell
+                  );
                   const hasOverlap = hasTeacherOverlapConflict(selectedCell.weekName, selectedCell.className, selectedCell.p, selectedCell.d, quickEditorCurrentCell);
                   const hasForcedConflict = Boolean(quickEditorCurrentCell?.forcedConflict);
                   if (!hasMismatch && !hasOverlap && !hasForcedConflict) return null;
@@ -2675,7 +2729,7 @@ export default function TimetableApp() {
                   return (
                     <div className="flex flex-wrap items-center gap-2 text-xs">
                       {hasMismatch && (
-                        <span className="px-2 py-1 rounded bg-blue-50 text-blue-700 border border-blue-200 font-semibold">파란 테두리 원인: 전담 템플릿 불일치</span>
+                        <span className="px-2 py-1 rounded bg-blue-50 text-blue-700 border border-blue-200 font-semibold">파란 테두리 원인: 전담 원배치/템플릿 불일치</span>
                       )}
                       {(hasOverlap || hasForcedConflict) && (
                         <span className="px-2 py-1 rounded bg-rose-50 text-rose-700 border border-rose-200 font-semibold">빨간 테두리 원인: 전담 중복 배치 또는 강제 이동</span>
@@ -2928,7 +2982,7 @@ export default function TimetableApp() {
               <h2 className="text-xl font-bold text-gray-800">
                 <span className="text-blue-600">[{currentWeekName}]</span> 전체 학급 주간 시간표
               </h2>
-              <p className="text-xs text-gray-500">각 학급 주간표를 전체 화면에 배치했습니다. 전담 중복은 빨간 테두리, 전담 템플릿 불일치는 파란 테두리로 표시되며 텍스트 크기는 상단 슬라이더로 조정할 수 있습니다.</p>
+              <p className="text-xs text-gray-500">각 학급 주간표를 전체 화면에 배치했습니다. 전담 중복은 빨간 테두리, 전담 원배치/템플릿 불일치는 파란 테두리로 표시되며 텍스트 크기는 상단 슬라이더로 조정할 수 있습니다.</p>
             </div>
             <div className="p-3 md:p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
               {CLASSES.map((cls) => (
@@ -3002,7 +3056,7 @@ export default function TimetableApp() {
             <div className="bg-indigo-50 border-b border-indigo-100 p-3 flex justify-between items-center shrink-0">
               <div className="flex items-center gap-2">
                 <Info className="text-indigo-500" size={18} />
-                <span className="text-sm text-indigo-800 font-medium">월간 조망 화면에서는 <strong>다른 학급의 전담 수업과도 자유롭게 교환</strong>할 수 있습니다! 전담 중복은 빨간 테두리, 전담 템플릿 불일치는 파란 테두리로 표시됩니다.</span>
+                <span className="text-sm text-indigo-800 font-medium">월간 조망 화면에서는 <strong>다른 학급의 전담 수업과도 자유롭게 교환</strong>할 수 있습니다! 전담 중복은 빨간 테두리, 전담 원배치/템플릿 불일치는 파란 테두리로 표시됩니다.</span>
               </div>
             </div>
             <div className="overflow-auto flex-1 relative">
@@ -3040,7 +3094,7 @@ export default function TimetableApp() {
                               const isSpecial = cell.type !== 'homeroom' && cell.type !== 'empty' && cell.type !== 'holiday';
                               const isHighlighted = hasTeacherHighlightFilter && cell.teacherId && highlightTeacherIds.includes(cell.teacherId);
                               const isDimmed = hasTeacherHighlightFilter && !isHighlighted;
-                              const isTemplateMismatch = isCellMismatchedWithTemplate(cls, pIdx, dIdx, cell);
+                              const isTemplateMismatch = isCellMismatchedWithTemplate(weekName, cls, pIdx, dIdx, cell);
                               const isTeacherConflict = hasTeacherOverlapConflict(weekName, cls, pIdx, dIdx, cell);
                               const hasForcedConflict = Boolean(cell?.forcedConflict);
                               const isSelected = selectedCell?.weekName === weekName && selectedCell?.className === cls && selectedCell?.p === pIdx && selectedCell?.d === dIdx;
@@ -3102,7 +3156,7 @@ export default function TimetableApp() {
             <div className="bg-indigo-50 border-b border-indigo-100 p-3 flex justify-between items-center">
               <div className="flex items-center gap-2">
                 <Info className="text-indigo-500" size={18} />
-                <span className="text-sm text-indigo-800 font-medium">종합표와 같은 내용(전체 학급)을 주차별 카드 형태로 표시합니다. 전담 중복은 빨간 테두리, 전담 템플릿 불일치는 파란 테두리로 표시되며, Space+클릭 드래그로 가로/세로 이동할 수 있습니다.</span>
+                <span className="text-sm text-indigo-800 font-medium">종합표와 같은 내용(전체 학급)을 주차별 카드 형태로 표시합니다. 전담 중복은 빨간 테두리, 전담 원배치/템플릿 불일치는 파란 테두리로 표시되며, Space+클릭 드래그로 가로/세로 이동할 수 있습니다.</span>
               </div>
             </div>
             <div className="p-2 md:p-3 grid grid-cols-1 gap-3">
