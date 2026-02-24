@@ -411,12 +411,16 @@ const normalizePayloadForSync = (payload, fallbackSnapshot) => {
     teacherConfigs,
     isPlainObject(payload.specialTemplates) ? payload.specialTemplates : fallbackSnapshot.specialTemplates
   );
+  const changeLogs = Array.isArray(payload.changeLogs)
+    ? payload.changeLogs
+    : (Array.isArray(fallbackSnapshot.changeLogs) ? fallbackSnapshot.changeLogs : []);
 
   return {
     allSchedules,
     standardHours,
     teacherConfigs,
-    specialTemplates
+    specialTemplates,
+    changeLogs
   };
 };
 
@@ -425,11 +429,17 @@ const hasRemoteSchedulePayload = (payload) =>
 
 const SHARED_STATE_ROW_ID = 'main';
 const SYNC_DEBOUNCE_MS = 1200;
+const MAX_UNDO_HISTORY = 50;
+const MAX_CHANGE_LOGS = 400;
 
 // --- [4] 메인 컴포넌트 ---
 export default function TimetableApp() {
   const [teacherConfigs, setTeacherConfigs] = useState(initialTeachers);
   const [allSchedules, setAllSchedules] = useState(() => createAllSchedules(initialTeachers));
+  const [undoStack, setUndoStack] = useState([]);
+  const [redoStack, setRedoStack] = useState([]);
+  const [changeLogs, setChangeLogs] = useState([]);
+  const [showChangeSummary, setShowChangeSummary] = useState(false);
 
   // 기준 시수 상태 관리
   const [standardHours, setStandardHours] = useState(() => {
@@ -455,7 +465,7 @@ export default function TimetableApp() {
   const [selectedCell, setSelectedCell] = useState(null);
   const [currentMonthIndex, setCurrentMonthIndex] = useState(0);
   const [highlightTeacherIds, setHighlightTeacherIds] = useState([]);
-  const [toast, setToast] = useState({ show: false, message: '', type: '' });
+  const [toast, setToast] = useState({ show: false, message: '', type: '', actionType: null, duration: 3000 });
   const [editingTeacherId, setEditingTeacherId] = useState(null);
   const [teacherForm, setTeacherForm] = useState({
     name: '',
@@ -468,6 +478,7 @@ export default function TimetableApp() {
     isSupabaseConfigured ? '초기 동기화 중...' : '로컬 모드 (동기화 비활성)'
   );
   const [lastSyncedAt, setLastSyncedAt] = useState(null);
+  const [lastUpdatedBy, setLastUpdatedBy] = useState(null);
   const isRemoteReadyRef = useRef(!isSupabaseConfigured);
   const isApplyingRemoteRef = useRef(false);
   const lastSyncedPayloadRef = useRef('');
@@ -562,11 +573,159 @@ export default function TimetableApp() {
   }, [teacherConfigs, normalizedSpecialTemplates]);
 
   useEffect(() => {
-    if (toast.show) {
-      const timer = setTimeout(() => setToast({ ...toast, show: false }), 3000);
-      return () => clearTimeout(timer);
+    if (!toast.show) return undefined;
+    const timer = setTimeout(() => {
+      setToast((prev) => ({ ...prev, show: false, actionType: null }));
+    }, toast.duration || 3000);
+    return () => clearTimeout(timer);
+  }, [toast.show, toast.duration]);
+
+  const showNotification = (message, type = 'error', options = {}) =>
+    setToast({
+      show: true,
+      message,
+      type,
+      actionType: options.actionType || null,
+      duration: options.duration ?? 3000
+    });
+
+  const formatSlotLabel = (periodIndex, dayIndex) => `${DAYS[dayIndex]} ${PERIODS[periodIndex]}교시`;
+  const getCellLabel = (cell) => (cell?.subject ? cell.subject : '빈칸');
+  const formatCellAddress = (weekName, className, periodIndex, dayIndex) =>
+    `${className} ${formatSlotLabel(periodIndex, dayIndex)}${weekName ? ` [${weekName}]` : ''}`;
+
+  const createChangeLogEntry = ({ type, summary, announcementText, weekKeys }) => ({
+    id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    type,
+    summary,
+    announcementText: announcementText || summary,
+    weekKeys: Array.from(new Set((weekKeys || []).filter(Boolean))),
+    updatedBy: clientIdRef.current,
+    updatedAt: new Date().toISOString()
+  });
+
+  const appendChangeLog = (entry) => {
+    if (!entry) return;
+    setChangeLogs((prev) => [entry, ...prev].slice(0, MAX_CHANGE_LOGS));
+  };
+
+  const applyScheduleChangeWithHistory = ({ nextAllSchedules, nextSelectedCell, changeLogEntry }) => {
+    setUndoStack((prev) => [...prev.slice(-(MAX_UNDO_HISTORY - 1)), allSchedules]);
+    setRedoStack([]);
+    setAllSchedules(nextAllSchedules);
+    if (nextSelectedCell !== undefined) {
+      setSelectedCell(nextSelectedCell);
     }
-  }, [toast]);
+    appendChangeLog(changeLogEntry);
+  };
+
+  const handleUndo = () => {
+    if (undoStack.length === 0) {
+      showNotification('되돌릴 변경이 없습니다.', 'error');
+      return;
+    }
+
+    const previousSchedules = undoStack[undoStack.length - 1];
+    setUndoStack((prev) => prev.slice(0, -1));
+    setRedoStack((prev) => [...prev.slice(-(MAX_UNDO_HISTORY - 1)), allSchedules]);
+    setAllSchedules(previousSchedules);
+    setSelectedCell(null);
+    appendChangeLog(
+      createChangeLogEntry({
+        type: 'undo',
+        summary: '되돌리기 실행',
+        announcementText: '되돌리기 실행: 직전 변경 취소',
+        weekKeys: [currentWeekName]
+      })
+    );
+    showNotification('직전 변경을 되돌렸습니다.', 'success', { actionType: 'redo', duration: 5500 });
+  };
+
+  const handleRedo = () => {
+    if (redoStack.length === 0) {
+      showNotification('다시 적용할 변경이 없습니다.', 'error');
+      return;
+    }
+
+    const nextSchedules = redoStack[redoStack.length - 1];
+    setRedoStack((prev) => prev.slice(0, -1));
+    setUndoStack((prev) => [...prev.slice(-(MAX_UNDO_HISTORY - 1)), allSchedules]);
+    setAllSchedules(nextSchedules);
+    setSelectedCell(null);
+    appendChangeLog(
+      createChangeLogEntry({
+        type: 'redo',
+        summary: '다시하기 실행',
+        announcementText: '다시하기 실행: 취소된 변경 재적용',
+        weekKeys: [currentWeekName]
+      })
+    );
+    showNotification('취소된 변경을 다시 적용했습니다.', 'success', { actionType: 'undo', duration: 5500 });
+  };
+
+  const currentWeekChangeLogs = useMemo(
+    () => changeLogs.filter((log) => Array.isArray(log.weekKeys) && log.weekKeys.includes(currentWeekName)),
+    [changeLogs, currentWeekName]
+  );
+
+  const copyCurrentWeekChangeSummary = async () => {
+    const lines = currentWeekChangeLogs
+      .slice()
+      .reverse()
+      .map((log) => log.announcementText || log.summary);
+    const text = lines.length > 0
+      ? lines.join('\n')
+      : `${currentWeekName}: 변경사항이 없습니다.`;
+
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      }
+      showNotification('변경사항 요약을 복사했습니다.', 'success');
+    } catch (_error) {
+      showNotification('클립보드 복사에 실패했습니다.', 'error');
+    }
+  };
+
+  useEffect(() => {
+    const isTypingLikeElement = (el) => {
+      if (!el || !(el instanceof HTMLElement)) return false;
+      const tag = el.tagName;
+      if (['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(tag)) return true;
+      return el.isContentEditable;
+    };
+
+    const handleUndoRedoKey = (e) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      if (isTypingLikeElement(e.target) || isTypingLikeElement(document.activeElement)) return;
+
+      const key = e.key.toLowerCase();
+      if (key === 'z' && e.shiftKey) {
+        e.preventDefault();
+        handleRedo();
+        return;
+      }
+      if (key === 'y') {
+        e.preventDefault();
+        handleRedo();
+        return;
+      }
+      if (key === 'z') {
+        e.preventDefault();
+        handleUndo();
+      }
+    };
+
+    window.addEventListener('keydown', handleUndoRedoKey);
+    return () => window.removeEventListener('keydown', handleUndoRedoKey);
+  }, [undoStack, redoStack, allSchedules, currentWeekName]);
 
   useEffect(() => {
     const stopPanDrag = () => {
@@ -668,7 +827,6 @@ export default function TimetableApp() {
     };
   }, [cellSubjectContextMenu, contextMenuSubjectValue, contextMenuInitialSubjectValue]);
 
-  const showNotification = (message, type = 'error') => setToast({ show: true, message, type });
   const teacherAssignableSubjects = ALL_SUBJECTS.filter(subject => subject !== '휴업일');
 
   const resetTeacherForm = () => {
@@ -863,13 +1021,26 @@ export default function TimetableApp() {
     }
 
     setSpecialTemplates(normalizedTemplates);
-    setAllSchedules(newAllSchedules);
-    setSelectedCell(null);
+    applyScheduleChangeWithHistory({
+      nextAllSchedules: newAllSchedules,
+      nextSelectedCell: null,
+      changeLogEntry: createChangeLogEntry({
+        type: 'template_apply',
+        summary: targetWeeks.length === 1
+          ? `[${targetWeeks[0]}] 전담 시간표 템플릿 전체 학급 배정`
+          : '모든 주차 전담 시간표 템플릿 전체 학급 배정',
+        announcementText: targetWeeks.length === 1
+          ? `${targetWeeks[0]}: 전담 시간표 템플릿을 전체 학급에 배정`
+          : '모든 주차: 전담 시간표 템플릿을 전체 학급에 배정',
+        weekKeys: targetWeeks
+      })
+    });
     showNotification(
       targetWeeks.length === 1
         ? `전담 시간표를 [${targetWeeks[0]}] 전체 학급에 배정했습니다.`
         : '전담 시간표를 모든 주차 전체 학급에 배정했습니다.',
-      'success'
+      'success',
+      { actionType: 'undo', duration: 5500 }
     );
   };
 
@@ -895,10 +1066,11 @@ export default function TimetableApp() {
       allSchedules,
       standardHours,
       teacherConfigs,
-      specialTemplates: normalizeSpecialTemplates(teacherConfigs, specialTemplates)
+      specialTemplates: normalizeSpecialTemplates(teacherConfigs, specialTemplates),
+      changeLogs
     });
 
-    const applyRemotePayload = (payload, syncedAt, fallbackSnapshot = getFallbackSnapshot()) => {
+    const applyRemotePayload = (payload, syncedAt, updatedBy, fallbackSnapshot = getFallbackSnapshot()) => {
       const normalizedPayload = normalizePayloadForSync(payload, fallbackSnapshot);
       if (!normalizedPayload) return false;
 
@@ -906,16 +1078,22 @@ export default function TimetableApp() {
         allSchedules: normalizedPayload.allSchedules,
         standardHours: normalizedPayload.standardHours,
         teacherConfigs: normalizedPayload.teacherConfigs,
-        specialTemplates: normalizedPayload.specialTemplates
+        specialTemplates: normalizedPayload.specialTemplates,
+        changeLogs: normalizedPayload.changeLogs
       };
 
       isApplyingRemoteRef.current = true;
       setAllSchedules(payloadForSync.allSchedules);
+      setSelectedCell(null);
       setStandardHours(payloadForSync.standardHours);
       setTeacherConfigs(payloadForSync.teacherConfigs);
       setSpecialTemplates(payloadForSync.specialTemplates);
+      setChangeLogs(Array.isArray(payloadForSync.changeLogs) ? payloadForSync.changeLogs : []);
+      setUndoStack([]);
+      setRedoStack([]);
       lastSyncedPayloadRef.current = JSON.stringify(payloadForSync);
       setLastSyncedAt(syncedAt || new Date().toISOString());
+      setLastUpdatedBy(updatedBy || null);
       setTimeout(() => {
         isApplyingRemoteRef.current = false;
       }, 0);
@@ -925,7 +1103,7 @@ export default function TimetableApp() {
     const ensureInitialState = async () => {
       const { data, error } = await supabase
         .from('timetable_state')
-        .select('payload, updated_at')
+        .select('payload, updated_at, updated_by')
         .eq('id', SHARED_STATE_ROW_ID)
         .maybeSingle();
 
@@ -945,7 +1123,7 @@ export default function TimetableApp() {
       const isRemotePayloadEmpty = isPlainObject(remotePayload) && Object.keys(remotePayload).length === 0;
 
       if (hasRemoteSchedulePayload(remotePayload)) {
-        const applied = applyRemotePayload(remotePayload, data.updated_at, fallbackSnapshot);
+        const applied = applyRemotePayload(remotePayload, data.updated_at, data.updated_by, fallbackSnapshot);
         if (!applied) {
           setSyncStatus('동기화 보류 (원격 데이터 형식 확인 필요)');
           isRemoteReadyRef.current = false;
@@ -975,6 +1153,7 @@ export default function TimetableApp() {
         } else {
           lastSyncedPayloadRef.current = payloadText;
           setLastSyncedAt(new Date().toISOString());
+          setLastUpdatedBy(clientIdRef.current);
           setSyncStatus('실시간 동기화 연결됨');
           isRemoteReadyRef.current = true;
         }
@@ -1002,7 +1181,7 @@ export default function TimetableApp() {
           if (payload.new?.updated_by === clientIdRef.current) return;
           if (!hasRemoteSchedulePayload(payload.new?.payload)) return;
 
-          const applied = applyRemotePayload(payload.new.payload, payload.new.updated_at);
+          const applied = applyRemotePayload(payload.new.payload, payload.new.updated_at, payload.new.updated_by);
           if (!applied) return;
           isRemoteReadyRef.current = true;
           setSyncStatus('원격 변경 반영됨');
@@ -1028,7 +1207,7 @@ export default function TimetableApp() {
     if (!isRemoteReadyRef.current) return undefined;
     if (isApplyingRemoteRef.current) return undefined;
 
-    const payload = { allSchedules, standardHours, teacherConfigs, specialTemplates };
+    const payload = { allSchedules, standardHours, teacherConfigs, specialTemplates, changeLogs };
     const payloadText = JSON.stringify(payload);
 
     if (payloadText === lastSyncedPayloadRef.current) return undefined;
@@ -1047,13 +1226,14 @@ export default function TimetableApp() {
 
       lastSyncedPayloadRef.current = payloadText;
       setLastSyncedAt(new Date().toISOString());
+      setLastUpdatedBy(clientIdRef.current);
       setSyncStatus('실시간 동기화 연결됨');
     }, SYNC_DEBOUNCE_MS);
 
     return () => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     };
-  }, [allSchedules, standardHours, teacherConfigs, specialTemplates]);
+  }, [allSchedules, standardHours, teacherConfigs, specialTemplates, changeLogs]);
 
   const findTeacherOverlapClasses = (schedulesMap, weekName, className, periodIndex, dayIndex, teacherId) => {
     if (!teacherId) return [];
@@ -1376,6 +1556,70 @@ export default function TimetableApp() {
     return { valid: true, reason: warnings.join(' ') };
   };
 
+  const selectedCellRecommendations = useMemo(() => {
+    if (!selectedCell) return null;
+    const { weekName, className, p: sourceP, d: sourceD } = selectedCell;
+    const weekSchedule = allSchedules?.[weekName];
+    if (!weekSchedule?.[className]) return null;
+
+    const sourceCellCurrent = weekSchedule[className]?.[sourceP]?.[sourceD];
+    if (!sourceCellCurrent) return null;
+
+    const sourceMeta = {
+      weekName,
+      className,
+      p: sourceP,
+      d: sourceD
+    };
+    const sourceCellForValidation = {
+      ...sourceCellCurrent,
+      ...sourceMeta
+    };
+
+    const moveTargets = [];
+    const swapTargets = [];
+    const blockedTargets = [];
+
+    for (let d = 0; d < DAYS.length; d++) {
+      for (let p = 0; p < PERIODS.length; p++) {
+        if (p === sourceP && d === sourceD) continue;
+
+        const targetCell = weekSchedule[className][p][d];
+        const targetMeta = { weekName, className, p, d };
+        const slotLabel = formatSlotLabel(p, d);
+
+        if (isHolidayCell(sourceCellCurrent) || isHolidayCell(targetCell)) {
+          blockedTargets.push({ slotLabel, reason: '휴업일 칸은 이동/교환 대상이 아닙니다.' });
+          continue;
+        }
+
+        if (isSpecialLikeCell(sourceCellCurrent)) {
+          const evaluation = evaluateSpecialSwapTarget(sourceMeta, sourceCellCurrent, targetMeta, targetCell);
+          if (!evaluation.canSwap) {
+            blockedTargets.push({ slotLabel, reason: getSpecialSwapBlockReasonText(evaluation, sourceCellCurrent) });
+            continue;
+          }
+        }
+
+        const validation = isSwapValid(sourceCellForValidation, weekName, className, p, d);
+        const warningReason = validation.reason ? `주의: ${validation.reason}` : '';
+        if (targetCell?.subject) {
+          swapTargets.push({
+            slotLabel,
+            reason: warningReason || `교환 가능 (${getCellLabel(targetCell)})`
+          });
+        } else {
+          moveTargets.push({
+            slotLabel,
+            reason: warningReason || '전담 충돌 없음'
+          });
+        }
+      }
+    }
+
+    return { moveTargets, swapTargets, blockedTargets };
+  }, [selectedCell, allSchedules]);
+
   const handleUniversalCellClick = (wName, cName, p, d) => {
     const clickedCell = allSchedules[wName][cName][p][d];
 
@@ -1450,8 +1694,16 @@ export default function TimetableApp() {
       newAllSchedules[wName][cName][p][d] = movedToTargetCell;
       newAllSchedules[w1][c1][p1][d1] = movedToSourceCell;
 
-      setAllSchedules(newAllSchedules);
-      setSelectedCell(null);
+      applyScheduleChangeWithHistory({
+        nextAllSchedules: newAllSchedules,
+        nextSelectedCell: null,
+        changeLogEntry: createChangeLogEntry({
+          type: 'swap',
+          summary: `${formatCellAddress(w1, c1, p1, d1)} ↔ ${formatCellAddress(wName, cName, p, d)} (${getCellLabel(sourceOriginalCell)} ↔ ${getCellLabel(targetOriginalCell)})`,
+          announcementText: `${c1} ${DAYS[d1]}요일 ${PERIODS[p1]}교시: ${getCellLabel(sourceOriginalCell)} ↔ ${cName} ${DAYS[d]}요일 ${PERIODS[p]}교시: ${getCellLabel(targetOriginalCell)}`,
+          weekKeys: [w1, wName]
+        })
+      });
 
       const warnings = [validation.reason];
       if (isForcedSpecialSwap) {
@@ -1471,7 +1723,7 @@ export default function TimetableApp() {
       if (mergedMessage) {
         showNotification(mergedMessage, warningMessage ? 'error' : 'info');
       } else {
-        showNotification(`시간표가 성공적으로 변경되었습니다!`, 'success');
+        showNotification(`시간표가 성공적으로 변경되었습니다!`, 'success', { actionType: 'undo', duration: 5500 });
       }
     }
   };
@@ -1479,6 +1731,7 @@ export default function TimetableApp() {
   const applySubjectChangeToCell = (weekName, className, p, d, newSubjectSelection) => {
     const currentCell = allSchedules?.[weekName]?.[className]?.[p]?.[d];
     if (!currentCell) return;
+    const previousSubjectLabel = getCellLabel(currentCell);
 
     const { subject: newSubject, forceHomeroom } = parseSubjectSelection(newSubjectSelection);
 
@@ -1489,12 +1742,22 @@ export default function TimetableApp() {
     newAllSchedules[weekName][className][p] = [...newAllSchedules[weekName][className][p]];
 
     if (!newSubject) {
-      newAllSchedules[weekName][className][p][d] = { subject: '', type: 'empty', forcedConflict: false, id: `${className}-${p}-${d}` };
-      setAllSchedules(newAllSchedules);
-      if (selectedCell && selectedCell.weekName === weekName && selectedCell.className === className && selectedCell.p === p && selectedCell.d === d) {
-        setSelectedCell({ weekName, className, p, d, ...newAllSchedules[weekName][className][p][d] });
-      }
-      showNotification('수업이 삭제되었습니다. (빈칸)', 'success');
+      const nextCell = { subject: '', type: 'empty', forcedConflict: false, id: `${className}-${p}-${d}` };
+      newAllSchedules[weekName][className][p][d] = nextCell;
+      const nextSelectedCell = selectedCell && selectedCell.weekName === weekName && selectedCell.className === className && selectedCell.p === p && selectedCell.d === d
+        ? { weekName, className, p, d, ...nextCell }
+        : undefined;
+      applyScheduleChangeWithHistory({
+        nextAllSchedules: newAllSchedules,
+        nextSelectedCell,
+        changeLogEntry: createChangeLogEntry({
+          type: 'subject_change',
+          summary: `${formatCellAddress(weekName, className, p, d)}: ${previousSubjectLabel} → 빈칸`,
+          announcementText: `${className} ${DAYS[d]}요일 ${PERIODS[p]}교시: ${previousSubjectLabel} → 빈칸`,
+          weekKeys: [weekName]
+        })
+      });
+      showNotification('수업이 삭제되었습니다. (빈칸)', 'success', { actionType: 'undo', duration: 5500 });
       return;
     }
 
@@ -1529,11 +1792,19 @@ export default function TimetableApp() {
     };
 
     newAllSchedules[weekName][className][p][d] = nextCell;
-    setAllSchedules(newAllSchedules);
-
-    if (selectedCell && selectedCell.weekName === weekName && selectedCell.className === className && selectedCell.p === p && selectedCell.d === d) {
-      setSelectedCell({ weekName, className, p, d, ...nextCell });
-    }
+    const nextSelectedCell = selectedCell && selectedCell.weekName === weekName && selectedCell.className === className && selectedCell.p === p && selectedCell.d === d
+      ? { weekName, className, p, d, ...nextCell }
+      : undefined;
+    applyScheduleChangeWithHistory({
+      nextAllSchedules: newAllSchedules,
+      nextSelectedCell,
+      changeLogEntry: createChangeLogEntry({
+        type: 'subject_change',
+        summary: `${formatCellAddress(weekName, className, p, d)}: ${previousSubjectLabel} → ${getCellLabel(nextCell)}`,
+        announcementText: `${className} ${DAYS[d]}요일 ${PERIODS[p]}교시: ${previousSubjectLabel} → ${getCellLabel(nextCell)}`,
+        weekKeys: [weekName]
+      })
+    });
 
     const warning = buildTeacherOverlapWarning(weekName, className, p, d, nextCell, newAllSchedules);
     const mismatchNotice = buildTemplateMismatchNotice(weekName, className, p, d, nextCell);
@@ -1546,7 +1817,7 @@ export default function TimetableApp() {
       return;
     }
 
-    showNotification(`${newSubject}${forceHomeroom ? ' (담임)' : ''} 과목으로 변경되었습니다.`, 'success');
+    showNotification(`${newSubject}${forceHomeroom ? ' (담임)' : ''} 과목으로 변경되었습니다.`, 'success', { actionType: 'undo', duration: 5500 });
   };
 
   // 📝 리스트에서 과목 바로 변경 또는 삭제(빈칸) 처리
@@ -1625,13 +1896,41 @@ export default function TimetableApp() {
       newAllSchedules[weekName][currentClass] = mergedRows;
     }
     
-    setAllSchedules(newAllSchedules);
+    applyScheduleChangeWithHistory({
+      nextAllSchedules: newAllSchedules,
+      nextSelectedCell: null,
+      changeLogEntry: createChangeLogEntry({
+        type: 'copy_to_future',
+        summary: `[${currentWeekName}] ${currentClass} 시간표를 이후 주차에 덮어쓰기`,
+        announcementText: `${currentClass} 시간표를 [${currentWeekName}] 기준으로 이후 주차에 덮어썼습니다.`,
+        weekKeys: [currentWeekName]
+      })
+    });
     showNotification(
       preservedHolidaySlots > 0
         ? `이후 모든 주차에 반영되었습니다. (휴업일 ${preservedHolidaySlots}칸은 유지)`
         : '이후 모든 주차에 성공적으로 반영되었습니다.',
-      'success'
+      'success',
+      { actionType: 'undo', duration: 5500 }
     );
+  };
+
+  const handleResetAllSchedules = () => {
+    const ok = window.confirm('현재 전담 교사 설정으로 전체 시간표를 새로 배정하시겠습니까?');
+    if (!ok) return;
+
+    const nextAllSchedules = createAllSchedules(teacherConfigs);
+    applyScheduleChangeWithHistory({
+      nextAllSchedules,
+      nextSelectedCell: null,
+      changeLogEntry: createChangeLogEntry({
+        type: 'reset',
+        summary: '전체 시간표 새로 배정',
+        announcementText: '전체 시간표를 현재 전담 교사 설정으로 다시 생성했습니다.',
+        weekKeys: [currentWeekName]
+      })
+    });
+    showNotification('전체 시간표를 새로 배정했습니다.', 'success', { actionType: 'undo', duration: 5500 });
   };
 
   const createCellFromExpectationOrFallback = (className, periodIndex, dayIndex) => {
@@ -1708,11 +2007,20 @@ export default function TimetableApp() {
       });
     });
 
-    setAllSchedules(nextAllSchedules);
-    setSelectedCell(null);
+    applyScheduleChangeWithHistory({
+      nextAllSchedules,
+      nextSelectedCell: null,
+      changeLogEntry: createChangeLogEntry({
+        type: 'holiday_apply',
+        summary: `[${weekName}] ${formatHolidayDayLabels(weekName, validDayIndices)} 전체 학급 휴업일 지정`,
+        announcementText: `[${weekName}] ${formatHolidayDayLabels(weekName, validDayIndices)} 전체 학급: 휴업일 지정`,
+        weekKeys: [weekName]
+      })
+    });
     showNotification(
       `[${weekName}] ${formatHolidayDayLabels(weekName, validDayIndices)} 전체 학급을 휴업일로 지정했습니다.`,
-      'success'
+      'success',
+      { actionType: 'undo', duration: 5500 }
     );
   };
 
@@ -1751,11 +2059,20 @@ export default function TimetableApp() {
       return;
     }
 
-    setAllSchedules(nextAllSchedules);
-    setSelectedCell(null);
+    applyScheduleChangeWithHistory({
+      nextAllSchedules,
+      nextSelectedCell: null,
+      changeLogEntry: createChangeLogEntry({
+        type: 'holiday_clear',
+        summary: `[${weekName}] ${formatHolidayDayLabels(weekName, validDayIndices)} 휴업일 해제`,
+        announcementText: `[${weekName}] ${formatHolidayDayLabels(weekName, validDayIndices)} 전체 학급: 휴업일 해제`,
+        weekKeys: [weekName]
+      })
+    });
     showNotification(
       `[${weekName}] ${formatHolidayDayLabels(weekName, validDayIndices)} 휴업일 지정을 해제했습니다.`,
-      'success'
+      'success',
+      { actionType: 'undo', duration: 5500 }
     );
   };
 
@@ -2056,13 +2373,18 @@ export default function TimetableApp() {
               <div>
                 <h1 className="text-2xl font-bold text-gray-800">2026학년도 스마트 시간표</h1>
                 <p className="text-sm text-gray-500">전담 충돌 방지 및 학기별 통합 관리 시스템</p>
-                <div className="mt-1 flex items-center gap-2 text-xs">
+                <div className="mt-1 flex flex-wrap items-center gap-2 text-xs">
                   <span className={`px-2 py-0.5 rounded-full font-semibold ${isSupabaseConfigured ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-600'}`}>
                     {syncStatus}
                   </span>
                   {lastSyncedAt && (
                     <span className="text-gray-400">
-                      마지막 동기화: {new Date(lastSyncedAt).toLocaleTimeString('ko-KR')}
+                      마지막 동기화: {new Date(lastSyncedAt).toLocaleString('ko-KR')}
+                    </span>
+                  )}
+                  {lastUpdatedBy && (
+                    <span className="text-gray-400">
+                      최근 수정자: {lastUpdatedBy}
                     </span>
                   )}
                 </div>
@@ -2136,8 +2458,32 @@ export default function TimetableApp() {
                     <span className="text-xs font-bold text-blue-700 w-10 text-right">{compactTextScalePercent}%</span>
                   </div>
                 )}
+                <button
+                  onClick={handleUndo}
+                  disabled={undoStack.length === 0}
+                  className="px-3 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm font-bold whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  ↶ 되돌리기
+                </button>
+                <button
+                  onClick={handleRedo}
+                  disabled={redoStack.length === 0}
+                  className="px-3 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm font-bold whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  ↷ 다시하기
+                </button>
                 <button onClick={applyToFutureWeeks} className="flex justify-center items-center gap-1 px-3 py-2 bg-indigo-50 border border-indigo-200 text-indigo-700 rounded-lg hover:bg-indigo-100 text-sm font-bold whitespace-nowrap shadow-sm">
                   <Copy size={16} /> 이후 덮어쓰기 (현재 반)
+                </button>
+                <button
+                  onClick={() => setShowChangeSummary((prev) => !prev)}
+                  className={`px-3 py-2 border rounded-lg text-sm font-bold whitespace-nowrap ${
+                    showChangeSummary
+                      ? 'bg-emerald-100 border-emerald-300 text-emerald-700'
+                      : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'
+                  }`}
+                >
+                  변경사항 보기
                 </button>
               </div>
             </div>
@@ -2280,10 +2626,86 @@ export default function TimetableApp() {
               />
             </div>
             
-            {/* 자리 교체 안내 */}
-            <div className="w-full text-xs text-gray-400 mt-2 xl:mt-0 xl:absolute xl:bottom-1 xl:right-4 xl:w-auto xl:text-right">
+            <div className="w-full text-xs text-gray-400">
               자리를 맞바꾸려면 다른 칸을 클릭하세요.
             </div>
+
+            {selectedCellRecommendations && (
+              <div className="w-full grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                <div className="border border-emerald-200 rounded-lg p-3 bg-emerald-50/60">
+                  <p className="font-bold text-emerald-800 mb-2">가능한 이동 칸 (빈칸 우선)</p>
+                  {selectedCellRecommendations.moveTargets.length > 0 ? (
+                    <ul className="space-y-1 text-emerald-900">
+                      {selectedCellRecommendations.moveTargets.slice(0, 8).map((item) => (
+                        <li key={`move-${item.slotLabel}`}>✅ {item.slotLabel} ({item.reason})</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="text-emerald-700">이동 가능한 빈칸이 없습니다.</p>
+                  )}
+                </div>
+
+                <div className="border border-blue-200 rounded-lg p-3 bg-blue-50/60">
+                  <p className="font-bold text-blue-800 mb-2">가능한 교환 칸</p>
+                  {selectedCellRecommendations.swapTargets.length > 0 ? (
+                    <ul className="space-y-1 text-blue-900">
+                      {selectedCellRecommendations.swapTargets.slice(0, 8).map((item) => (
+                        <li key={`swap-${item.slotLabel}`}>✅ {item.slotLabel} ({item.reason})</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="text-blue-700">교환 가능한 칸이 없습니다.</p>
+                  )}
+                </div>
+
+                <div className="border border-red-200 rounded-lg p-3 bg-red-50/60">
+                  <p className="font-bold text-red-800 mb-2">불가 사유</p>
+                  {selectedCellRecommendations.blockedTargets.length > 0 ? (
+                    <ul className="space-y-1 text-red-900">
+                      {selectedCellRecommendations.blockedTargets.slice(0, 6).map((item) => (
+                        <li key={`blocked-${item.slotLabel}`}>❌ {item.slotLabel} ({item.reason})</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="text-red-700">불가한 칸이 없습니다.</p>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {viewMode === 'weekly' && showChangeSummary && (
+          <div className="mb-4 bg-white border border-emerald-200 rounded-xl p-4 shadow-sm">
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-3">
+              <div>
+                <h3 className="font-bold text-emerald-900">이번 주 변경사항 요약</h3>
+                <p className="text-xs text-emerald-700">
+                  [{currentWeekName}] 기준 {currentWeekChangeLogs.length}건
+                </p>
+              </div>
+              <button
+                onClick={copyCurrentWeekChangeSummary}
+                className="px-3 py-2 bg-emerald-600 text-white rounded-lg text-sm font-bold hover:bg-emerald-700 w-full md:w-auto"
+              >
+                공지용 텍스트 복사
+              </button>
+            </div>
+
+            {currentWeekChangeLogs.length > 0 ? (
+              <div className="max-h-72 overflow-auto space-y-2">
+                {currentWeekChangeLogs.map((log) => (
+                  <div key={log.id} className="border border-gray-200 rounded-lg p-2 bg-gray-50">
+                    <p className="text-sm font-semibold text-gray-800">{log.summary}</p>
+                    <p className="text-xs text-gray-500">
+                      {new Date(log.updatedAt).toLocaleString('ko-KR')} · {log.updatedBy || 'unknown'}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-gray-500">이번 주 변경사항이 아직 없습니다.</p>
+            )}
           </div>
         )}
 
@@ -2291,6 +2713,22 @@ export default function TimetableApp() {
           <div className={`fixed top-6 left-1/2 transform -translate-x-1/2 z-50 px-6 py-3 rounded-full shadow-lg flex items-center gap-2 animate-bounce ${toast.type === 'error' ? 'bg-red-600 text-white' : toast.type === 'info' ? 'bg-blue-600 text-white' : 'bg-green-600 text-white'}`}>
             {toast.type === 'error' ? <AlertCircle size={20} /> : toast.type === 'info' ? <Info size={20} /> : <CheckCircle size={20} />}
             <span className="font-semibold">{toast.message}</span>
+            {toast.actionType === 'undo' && (
+              <button
+                onClick={handleUndo}
+                className="ml-2 px-2 py-1 text-xs rounded bg-white/20 hover:bg-white/30 font-bold"
+              >
+                되돌리기
+              </button>
+            )}
+            {toast.actionType === 'redo' && (
+              <button
+                onClick={handleRedo}
+                className="ml-2 px-2 py-1 text-xs rounded bg-white/20 hover:bg-white/30 font-bold"
+              >
+                다시하기
+              </button>
+            )}
           </div>
         )}
 
@@ -2814,7 +3252,7 @@ export default function TimetableApp() {
           <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 animate-fade-in">
             <div className="flex flex-col md:flex-row md:justify-between md:items-center mb-6 border-b pb-4 gap-3">
               <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2"><Settings className="text-orange-600"/> 전담 교사 관리</h2>
-              <button onClick={() => window.confirm('현재 전담 교사 설정으로 전체 시간표를 새로 배정하시겠습니까?') && setAllSchedules(createAllSchedules(teacherConfigs))} className="px-4 py-2 bg-red-50 text-red-600 border border-red-200 rounded-lg hover:bg-red-100 font-bold text-sm whitespace-nowrap">전체 초기화 (새로 배정)</button>
+              <button onClick={handleResetAllSchedules} className="px-4 py-2 bg-red-50 text-red-600 border border-red-200 rounded-lg hover:bg-red-100 font-bold text-sm whitespace-nowrap">전체 초기화 (새로 배정)</button>
             </div>
 
             <div className="mb-6 border border-slate-200 rounded-xl overflow-hidden">
