@@ -267,6 +267,8 @@ export default function TimetableApp() {
   const [monthlyLayoutMode, setMonthlyLayoutMode] = useState('class_weekly'); // matrix, class_weekly
   const [compactTextScalePercent, setCompactTextScalePercent] = useState(100);
   const [monthlyTextScalePercent, setMonthlyTextScalePercent] = useState(100);
+  const [holidayWeekIndex, setHolidayWeekIndex] = useState(0);
+  const [holidayDayIndex, setHolidayDayIndex] = useState(0);
   const [isTopHeaderHidden, setIsTopHeaderHidden] = useState(false);
   const [isSpacePanMode, setIsSpacePanMode] = useState(false);
   const [currentWeekIndex, setCurrentWeekIndex] = useState(0);
@@ -295,6 +297,8 @@ export default function TimetableApp() {
   const panDragRef = useRef(null);
   
   const currentWeekName = WEEKS[currentWeekIndex];
+  const holidayTargetWeekName = WEEKS[holidayWeekIndex] || WEEKS[0];
+  const holidayTargetDayLabel = getDatesForWeek(holidayTargetWeekName)?.[holidayDayIndex] || DAYS[holidayDayIndex];
   const schedules = allSchedules[currentWeekName];
   const normalizedSpecialTemplates = useMemo(
     () => normalizeSpecialTemplates(teacherConfigs, specialTemplates),
@@ -945,6 +949,86 @@ export default function TimetableApp() {
     showNotification(`이후 모든 주차에 성공적으로 반영되었습니다.`, 'success');
   };
 
+  const createCellFromExpectationOrFallback = (className, periodIndex, dayIndex) => {
+    const expected = templateExpectationMap[className]?.[periodIndex]?.[dayIndex] ?? null;
+    if (!expected || Array.isArray(expected)) {
+      return createHomeroomFallbackCell(className, periodIndex, dayIndex);
+    }
+
+    return {
+      subject: expected.subject,
+      type: 'special',
+      teacherId: expected.teacherId,
+      teacher: expected.teacher,
+      location: (expected.location || '').trim() || getDefaultLocation(expected.subject, dayIndex, periodIndex),
+      id: `${className}-${periodIndex}-${dayIndex}-special`
+    };
+  };
+
+  const applyHolidayToDay = (weekName, dayIndex) => {
+    const sourceWeek = allSchedules[weekName];
+    if (!sourceWeek) {
+      showNotification('선택한 주차 정보를 찾을 수 없습니다.', 'error');
+      return;
+    }
+
+    const nextAllSchedules = { ...allSchedules, [weekName]: { ...sourceWeek } };
+
+    CLASSES.forEach((className) => {
+      const classRows = sourceWeek[className];
+      nextAllSchedules[weekName][className] = classRows.map((row, periodIndex) => {
+        const copiedRow = [...row];
+        copiedRow[dayIndex] = {
+          subject: '휴업일',
+          type: 'holiday',
+          teacherId: null,
+          teacher: '',
+          location: '',
+          id: `${className}-${periodIndex}-${dayIndex}-holiday`
+        };
+        return copiedRow;
+      });
+    });
+
+    setAllSchedules(nextAllSchedules);
+    setSelectedCell(null);
+    showNotification(`[${weekName}] ${getDatesForWeek(weekName)[dayIndex]} 전체 학급을 휴업일로 지정했습니다.`, 'success');
+  };
+
+  const clearHolidayFromDay = (weekName, dayIndex) => {
+    const sourceWeek = allSchedules[weekName];
+    if (!sourceWeek) {
+      showNotification('선택한 주차 정보를 찾을 수 없습니다.', 'error');
+      return;
+    }
+
+    const nextAllSchedules = { ...allSchedules, [weekName]: { ...sourceWeek } };
+    let restoredCount = 0;
+
+    CLASSES.forEach((className) => {
+      const classRows = sourceWeek[className];
+      nextAllSchedules[weekName][className] = classRows.map((row, periodIndex) => {
+        const copiedRow = [...row];
+        const cell = copiedRow[dayIndex];
+        const isHolidayCell = cell?.type === 'holiday' || cell?.subject === '휴업일';
+        if (!isHolidayCell) return copiedRow;
+
+        copiedRow[dayIndex] = createCellFromExpectationOrFallback(className, periodIndex, dayIndex);
+        restoredCount += 1;
+        return copiedRow;
+      });
+    });
+
+    if (restoredCount === 0) {
+      showNotification('선택한 요일에는 휴업일 지정 칸이 없습니다.', 'error');
+      return;
+    }
+
+    setAllSchedules(nextAllSchedules);
+    setSelectedCell(null);
+    showNotification(`[${weekName}] ${getDatesForWeek(weekName)[dayIndex]} 휴업일 지정을 해제했습니다.`, 'success');
+  };
+
   const getCellStyles = (p, d, cell) => {
     const isSelected = selectedCell?.weekName === currentWeekName && selectedCell?.className === currentClass && selectedCell?.p === p && selectedCell?.d === d;
     let baseStyle = "relative transition-all duration-200 ease-in-out border border-gray-300 p-2 h-24 flex flex-col items-center justify-center cursor-pointer font-medium text-lg rounded-sm ";
@@ -973,6 +1057,9 @@ export default function TimetableApp() {
   const isCellMismatchedWithTemplate = (className, periodIndex, dayIndex, cell) => {
     const expected = templateExpectationMap[className]?.[periodIndex]?.[dayIndex] ?? null;
     const actual = cell || { subject: '', type: 'empty', teacherId: null, location: '' };
+
+    // 휴업일은 설정에서 의도적으로 지정한 예외로 간주
+    if (actual.type === 'holiday' || actual.subject === '휴업일') return false;
 
     // 템플릿에 동일 슬롯의 기대값이 2개 이상이면 템플릿 자체 충돌로 간주
     if (Array.isArray(expected)) return true;
@@ -1870,6 +1957,76 @@ export default function TimetableApp() {
             <div className="flex flex-col md:flex-row md:justify-between md:items-center mb-6 border-b pb-4 gap-3">
               <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2"><Settings className="text-orange-600"/> 전담 교사 관리</h2>
               <button onClick={() => window.confirm('현재 전담 교사 설정으로 전체 시간표를 새로 배정하시겠습니까?') && setAllSchedules(createAllSchedules(teacherConfigs))} className="px-4 py-2 bg-red-50 text-red-600 border border-red-200 rounded-lg hover:bg-red-100 font-bold text-sm whitespace-nowrap">전체 초기화 (새로 배정)</button>
+            </div>
+
+            <div className="mb-6 border border-slate-200 rounded-xl overflow-hidden">
+              <div className="bg-slate-50 px-4 py-3 border-b border-slate-100 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-2">
+                <h3 className="font-bold text-slate-900">휴업일 지정</h3>
+                <span className="text-xs text-slate-600 font-medium">선택한 날짜를 전체 학급 · 전교시 휴업일로 일괄 반영합니다.</span>
+              </div>
+
+              <div className="p-4 bg-white grid grid-cols-1 lg:grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-xs font-bold text-gray-500 mb-1">주차 선택</label>
+                  <select
+                    value={holidayWeekIndex}
+                    onChange={(e) => setHolidayWeekIndex(Number(e.target.value))}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-slate-400"
+                  >
+                    {WEEKS.map((weekName, idx) => (
+                      <option key={`holiday-week-${weekName}`} value={idx}>{weekName}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="lg:col-span-2">
+                  <label className="block text-xs font-bold text-gray-500 mb-1">요일 선택</label>
+                  <div className="flex flex-wrap gap-2">
+                    {DAYS.map((day, dIdx) => {
+                      const label = getDatesForWeek(holidayTargetWeekName)?.[dIdx] || day;
+                      const isSelected = holidayDayIndex === dIdx;
+                      return (
+                        <button
+                          key={`holiday-day-${day}`}
+                          type="button"
+                          onClick={() => setHolidayDayIndex(dIdx)}
+                          className={`px-3 py-1.5 rounded-md text-xs font-bold border transition-colors ${isSelected ? 'bg-slate-700 text-white border-slate-700' : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'}`}
+                        >
+                          {label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              <div className="px-4 pb-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+                <p className="text-xs text-slate-600">
+                  현재 선택: <span className="font-bold text-slate-800">{holidayTargetWeekName}</span> · <span className="font-bold text-slate-800">{holidayTargetDayLabel}</span>
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={() => {
+                      const ok = window.confirm(`[${holidayTargetWeekName}] ${holidayTargetDayLabel}을(를) 전체 학급 휴업일로 지정할까요?`);
+                      if (!ok) return;
+                      applyHolidayToDay(holidayTargetWeekName, holidayDayIndex);
+                    }}
+                    className="px-3 py-2 text-xs font-bold bg-slate-700 text-white rounded border border-slate-700 hover:bg-slate-800"
+                  >
+                    휴업일 지정
+                  </button>
+                  <button
+                    onClick={() => {
+                      const ok = window.confirm(`[${holidayTargetWeekName}] ${holidayTargetDayLabel}의 휴업일 지정을 해제할까요?`);
+                      if (!ok) return;
+                      clearHolidayFromDay(holidayTargetWeekName, holidayDayIndex);
+                    }}
+                    className="px-3 py-2 text-xs font-bold bg-white text-slate-700 rounded border border-slate-300 hover:bg-slate-100"
+                  >
+                    휴업일 해제
+                  </button>
+                </div>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
