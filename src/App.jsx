@@ -780,15 +780,8 @@ export default function TimetableApp() {
           const actualCell = weekSchedule?.[className]?.[p]?.[d];
 
           if (!isSpecialLikeCell(actualCell) && expectedEntries.length === 0) continue;
-          if (actualCell?.type === 'holiday' || actualCell?.subject === '휴업일') {
-            if (expectedEntries.length === 0) continue;
-            items.push({
-              id: `${className}-${p}-${d}`,
-              summary: `${className} ${DAYS[d]}요일 ${PERIODS[p]}교시: ${formatExpectedSpecialLabel(expectedEntries)} → 휴업일`,
-              weekName: currentWeekName
-            });
-            continue;
-          }
+          // 요청사항: 휴업일 관련 변경은 "변경사항" 목록에서 제외한다.
+          if (actualCell?.type === 'holiday' || actualCell?.subject === '휴업일') continue;
 
           const expectedMatched = expectedEntries.some((expected) => isExpectedSpecialMatch(actualCell, expected));
           const hasDifference = expectedEntries.length > 0
