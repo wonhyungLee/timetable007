@@ -1316,10 +1316,6 @@ export default function TimetableApp() {
 
     const cell = allSchedules?.[weekName]?.[className]?.[p]?.[d];
     if (!cell) return;
-    if (isHolidayCell(cell)) {
-      showNotification('휴업일 칸은 설정의 휴업일 해제를 통해서만 수정할 수 있습니다.', 'error');
-      return;
-    }
 
     setCurrentClass(className);
     setCellSubjectContextMenu({
@@ -1485,11 +1481,6 @@ export default function TimetableApp() {
     if (!currentCell) return;
 
     const { subject: newSubject, forceHomeroom } = parseSubjectSelection(newSubjectSelection);
-
-    if (isHolidayCell(currentCell) && newSubject !== '휴업일') {
-      showNotification('휴업일 칸은 설정에서 휴업일 해제 후 수정할 수 있습니다.', 'error');
-      return;
-    }
 
     const newAllSchedules = { ...allSchedules };
 
@@ -2227,8 +2218,7 @@ export default function TimetableApp() {
               <select 
                 value={selectedSubjectOptionValue} 
                 onChange={(e) => handleDirectSubjectChange(e.target.value)}
-                disabled={isSelectedHolidayCell}
-                className="border border-gray-300 p-2 rounded-md shadow-inner focus:outline-none focus:ring-2 focus:ring-yellow-500 bg-gray-50 font-bold text-gray-700 disabled:bg-gray-100 disabled:text-gray-400"
+                className="border border-gray-300 p-2 rounded-md shadow-inner focus:outline-none focus:ring-2 focus:ring-yellow-500 bg-gray-50 font-bold text-gray-700"
               >
                 <option value="" disabled>-- 과목 선택 --</option>
                 {SUBJECT_SELECT_OPTIONS.map((opt) => (
@@ -2239,14 +2229,10 @@ export default function TimetableApp() {
 
               <button 
                 onClick={() => handleDirectSubjectChange('')} 
-                disabled={isSelectedHolidayCell}
-                className="flex items-center gap-1 bg-red-50 text-red-600 px-3 py-2 rounded border border-red-200 hover:bg-red-100 font-bold text-sm transition disabled:opacity-50 disabled:cursor-not-allowed"
+                className="flex items-center gap-1 bg-red-50 text-red-600 px-3 py-2 rounded border border-red-200 hover:bg-red-100 font-bold text-sm transition"
               >
                 <Trash2 size={16} /> 수업 삭제 (빈칸)
               </button>
-              {isSelectedHolidayCell && (
-                <span className="text-xs text-rose-500">휴업일 칸은 설정에서 휴업일 해제 후 수정할 수 있습니다.</span>
-              )}
             </div>
 
             <div className="flex items-center gap-2 ml-0 xl:ml-auto pt-4 xl:pt-0 border-t xl:border-t-0 border-gray-200 w-full xl:w-auto">
