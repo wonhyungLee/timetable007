@@ -463,6 +463,7 @@ export default function TimetableApp() {
   const [currentWeekIndex, setCurrentWeekIndex] = useState(0);
   const [currentClass, setCurrentClass] = useState('1반');
   const [selectedCell, setSelectedCell] = useState(null);
+  const [quickEditorAction, setQuickEditorAction] = useState('subject');
   const [currentMonthIndex, setCurrentMonthIndex] = useState(0);
   const [highlightTeacherIds, setHighlightTeacherIds] = useState([]);
   const [toast, setToast] = useState({ show: false, message: '', type: '', actionType: null, duration: 3000 });
@@ -520,11 +521,15 @@ export default function TimetableApp() {
   const isWeeklyAllView = viewMode === 'weekly' && weeklyLayoutMode === 'all';
   const isMonthlyClassWeeklyView = viewMode === 'monthly' && monthlyLayoutMode === 'class_weekly';
   const isWideContentMode = isWeeklyAllView || isMonthlyClassWeeklyView;
+  const isQuickEditorVisible = Boolean(selectedCell && (viewMode === 'weekly' || viewMode === 'monthly'));
   const isSelectedHolidayCell = isHolidayCell(selectedCell);
   const liveSelectedCell = selectedCell
     ? allSchedules?.[selectedCell.weekName]?.[selectedCell.className]?.[selectedCell.p]?.[selectedCell.d]
     : null;
-  const isSpecialSelectionForSwapHint = isSpecialLikeCell(liveSelectedCell || selectedCell);
+  const selectedCellDateText = selectedCell
+    ? (getDatesForWeek(selectedCell.weekName)?.[selectedCell.d] || DAYS[selectedCell.d])
+    : '';
+  const quickEditorCurrentCell = liveSelectedCell || selectedCell;
   const selectedSubjectOptionValue = selectedCell ? getSubjectSelectionValueForCell(selectedCell) : '';
   const hasTeacherHighlightFilter = highlightTeacherIds.length > 0;
   const teacherClassNameSetMap = useMemo(() => {
@@ -668,6 +673,16 @@ export default function TimetableApp() {
     [changeLogs, currentWeekName]
   );
 
+  const quickEditorActionGuideText = useMemo(() => {
+    if (quickEditorAction === 'swap') {
+      return '교환 모드: 다른 수업 칸을 클릭하면 서로 바뀝니다.';
+    }
+    if (quickEditorAction === 'move') {
+      return '이동 모드: 빈칸을 클릭하면 해당 칸으로 이동합니다.';
+    }
+    return '과목 변경 모드: 아래에서 과목/장소를 바로 수정하세요.';
+  }, [quickEditorAction]);
+
   const copyCurrentWeekChangeSummary = async () => {
     const lines = currentWeekChangeLogs
       .slice()
@@ -726,6 +741,12 @@ export default function TimetableApp() {
     window.addEventListener('keydown', handleUndoRedoKey);
     return () => window.removeEventListener('keydown', handleUndoRedoKey);
   }, [undoStack, redoStack, allSchedules, currentWeekName]);
+
+  useEffect(() => {
+    if (!isQuickEditorVisible) {
+      setQuickEditorAction('subject');
+    }
+  }, [isQuickEditorVisible]);
 
   useEffect(() => {
     const stopPanDrag = () => {
@@ -1625,12 +1646,23 @@ export default function TimetableApp() {
 
     if (selectedCell && selectedCell.weekName === wName && selectedCell.className === cName && selectedCell.p === p && selectedCell.d === d) {
       setSelectedCell(null);
+      setQuickEditorAction('subject');
       return;
     }
 
     if (!selectedCell) {
       setSelectedCell({ weekName: wName, className: cName, p, d, ...clickedCell });
+      setQuickEditorAction('subject');
     } else {
+      if (quickEditorAction === 'move' && clickedCell?.subject) {
+        showNotification('이동 모드에서는 빈칸만 선택할 수 있습니다. 빈칸 후보를 선택해주세요.', 'error');
+        return;
+      }
+      if (quickEditorAction === 'swap' && !clickedCell?.subject) {
+        showNotification('교환 모드에서는 수업이 있는 칸을 선택해주세요.', 'error');
+        return;
+      }
+
       const sourceCellCurrent = allSchedules[selectedCell.weekName][selectedCell.className][selectedCell.p][selectedCell.d];
       const sourceMeta = {
         weekName: selectedCell.weekName,
@@ -1725,6 +1757,7 @@ export default function TimetableApp() {
       } else {
         showNotification(`시간표가 성공적으로 변경되었습니다!`, 'success', { actionType: 'undo', duration: 5500 });
       }
+      setQuickEditorAction('subject');
     }
   };
 
@@ -2351,7 +2384,7 @@ export default function TimetableApp() {
 
   return (
     <div className={`min-h-screen bg-slate-100 font-sans ${isWideContentMode ? 'p-2 md:p-3' : 'p-2 md:p-6'}`}>
-      <div className={`${isWideContentMode ? 'w-full' : 'max-w-[1400px]'} mx-auto`}>
+      <div className={`${isWideContentMode ? 'w-full' : 'max-w-[1400px]'} mx-auto ${isQuickEditorVisible ? 'xl:pr-[25rem]' : ''}`}>
         <div className="mb-2 flex justify-end">
           <button
             onClick={() => setIsTopHeaderHidden(prev => !prev)}
@@ -2551,128 +2584,188 @@ export default function TimetableApp() {
         </div>
         )}
 
-        {/* 🛠️ [공통 퀵 에디터] 과목 변경 / 삭제 / 비고 입력 */}
-        {selectedCell && (viewMode === 'weekly' || viewMode === 'monthly') && (
-          <div className="mb-4 bg-white border-2 border-yellow-400 p-4 rounded-xl flex flex-col xl:flex-row items-start xl:items-center gap-4 shadow-md animate-fade-in relative">
-            <div className="absolute top-2 right-2 text-gray-400 hover:text-gray-700 cursor-pointer" onClick={() => setSelectedCell(null)}>
-              <X size={20} />
-            </div>
-            
-            <div className="flex items-center gap-2 font-bold text-gray-800">
-              <Edit2 className="text-yellow-500" size={20} />
-              <span>[{selectedCell.weekName}] {selectedCell.className} - {DAYS[selectedCell.d]}요일 {PERIODS[selectedCell.p]}교시</span>
-            </div>
-
-            {(() => {
-              const liveCell = allSchedules?.[selectedCell.weekName]?.[selectedCell.className]?.[selectedCell.p]?.[selectedCell.d] || selectedCell;
-              const hasMismatch = isCellMismatchedWithTemplate(selectedCell.className, selectedCell.p, selectedCell.d, liveCell);
-              const hasOverlap = hasTeacherOverlapConflict(selectedCell.weekName, selectedCell.className, selectedCell.p, selectedCell.d, liveCell);
-              const hasForcedConflict = Boolean(liveCell?.forcedConflict);
-              if (!hasMismatch && !hasOverlap && !hasForcedConflict) return null;
-
-              return (
-                <div className="flex flex-wrap items-center gap-2 text-xs">
-                  {hasMismatch && (
-                    <span className="px-2 py-1 rounded bg-blue-50 text-blue-700 border border-blue-200 font-semibold">파란 테두리 원인: 전담 템플릿 불일치</span>
-                  )}
-                  {(hasOverlap || hasForcedConflict) && (
-                    <span className="px-2 py-1 rounded bg-rose-50 text-rose-700 border border-rose-200 font-semibold">빨간 테두리 원인: 전담 중복 배치 또는 강제 이동</span>
-                  )}
-                </div>
-              );
-            })()}
-
-            {isSpecialSelectionForSwapHint && (
-              <div className="flex flex-wrap items-center gap-2 text-xs">
-                <span className="px-2 py-1 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold">초록 음영: 선택 전담 교사 기준 이동 가능 시간</span>
-                <span className="px-2 py-1 rounded bg-gray-900 text-white border border-gray-800 font-semibold">검정 음영: 교사 조건 불충족 (클릭 시 강제 이동 확인)</span>
-                <span className="px-2 py-1 rounded bg-red-50 text-red-700 border border-red-200 font-semibold">X 오버레이: 휴업일(이동 불가)</span>
-                <span className="px-2 py-1 rounded bg-indigo-50 text-indigo-700 border border-indigo-200 font-semibold">강제 이동 시 빨간 테두리로 표시</span>
-              </div>
-            )}
-
-            <div className="flex flex-wrap items-center gap-3">
-              <span className="text-sm font-semibold text-gray-500">과목 변경:</span>
-              <select 
-                value={selectedSubjectOptionValue} 
-                onChange={(e) => handleDirectSubjectChange(e.target.value)}
-                className="border border-gray-300 p-2 rounded-md shadow-inner focus:outline-none focus:ring-2 focus:ring-yellow-500 bg-gray-50 font-bold text-gray-700"
-              >
-                <option value="" disabled>-- 과목 선택 --</option>
-                {SUBJECT_SELECT_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>{opt.label}</option>
-                ))}
-              </select>
-              <span className="text-xs text-gray-400">과학/체육/음악은 전담/담임 선택 가능</span>
-
-              <button 
-                onClick={() => handleDirectSubjectChange('')} 
-                className="flex items-center gap-1 bg-red-50 text-red-600 px-3 py-2 rounded border border-red-200 hover:bg-red-100 font-bold text-sm transition"
-              >
-                <Trash2 size={16} /> 수업 삭제 (빈칸)
-              </button>
-            </div>
-
-            <div className="flex items-center gap-2 ml-0 xl:ml-auto pt-4 xl:pt-0 border-t xl:border-t-0 border-gray-200 w-full xl:w-auto">
-              <MapPin className="text-gray-400" size={18} />
-              <span className="text-sm font-semibold text-gray-500 whitespace-nowrap">비고/장소:</span>
-              <input 
-                type="text" 
-                value={selectedCell.location || ''} 
-                onChange={(e) => handleLocationChange(e.target.value)}
-                placeholder="비고나 장소 입력"
-                disabled={isSelectedHolidayCell}
-                className="border border-gray-300 p-2 rounded-md shadow-inner focus:outline-none focus:ring-2 focus:ring-blue-500 w-48 md:w-64 text-sm disabled:bg-gray-100 disabled:text-gray-400"
-              />
-            </div>
-            
-            <div className="w-full text-xs text-gray-400">
-              자리를 맞바꾸려면 다른 칸을 클릭하세요.
-            </div>
-
-            {selectedCellRecommendations && (
-              <div className="w-full grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
-                <div className="border border-emerald-200 rounded-lg p-3 bg-emerald-50/60">
-                  <p className="font-bold text-emerald-800 mb-2">가능한 이동 칸 (빈칸 우선)</p>
-                  {selectedCellRecommendations.moveTargets.length > 0 ? (
-                    <ul className="space-y-1 text-emerald-900">
-                      {selectedCellRecommendations.moveTargets.slice(0, 8).map((item) => (
-                        <li key={`move-${item.slotLabel}`}>✅ {item.slotLabel} ({item.reason})</li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p className="text-emerald-700">이동 가능한 빈칸이 없습니다.</p>
-                  )}
-                </div>
-
-                <div className="border border-blue-200 rounded-lg p-3 bg-blue-50/60">
-                  <p className="font-bold text-blue-800 mb-2">가능한 교환 칸</p>
-                  {selectedCellRecommendations.swapTargets.length > 0 ? (
-                    <ul className="space-y-1 text-blue-900">
-                      {selectedCellRecommendations.swapTargets.slice(0, 8).map((item) => (
-                        <li key={`swap-${item.slotLabel}`}>✅ {item.slotLabel} ({item.reason})</li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p className="text-blue-700">교환 가능한 칸이 없습니다.</p>
-                  )}
-                </div>
-
-                <div className="border border-red-200 rounded-lg p-3 bg-red-50/60">
-                  <p className="font-bold text-red-800 mb-2">불가 사유</p>
-                  {selectedCellRecommendations.blockedTargets.length > 0 ? (
-                    <ul className="space-y-1 text-red-900">
-                      {selectedCellRecommendations.blockedTargets.slice(0, 6).map((item) => (
-                        <li key={`blocked-${item.slotLabel}`}>❌ {item.slotLabel} ({item.reason})</li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p className="text-red-700">불가한 칸이 없습니다.</p>
-                  )}
+        {isQuickEditorVisible && (
+          <>
+            <div
+              className="fixed inset-0 z-[52] bg-black/20 xl:hidden"
+              onClick={() => {
+                setSelectedCell(null);
+                setQuickEditorAction('subject');
+              }}
+            />
+            <aside className="fixed z-[60] inset-x-0 bottom-0 max-h-[82vh] rounded-t-2xl bg-white border border-gray-200 shadow-2xl flex flex-col xl:inset-auto xl:right-4 xl:top-4 xl:bottom-4 xl:w-[380px] xl:max-h-none xl:rounded-2xl">
+              <div className="p-4 border-b border-gray-200 bg-slate-50 rounded-t-2xl xl:rounded-t-2xl">
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <h3 className="text-base font-bold text-gray-900">선택한 칸 편집</h3>
+                    <p className="text-xs text-gray-600 mt-1">
+                      [{selectedCell.weekName}] {selectedCell.className} / {selectedCellDateText} / {PERIODS[selectedCell.p]}교시
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setSelectedCell(null);
+                      setQuickEditorAction('subject');
+                    }}
+                    className="text-gray-400 hover:text-gray-700"
+                  >
+                    <X size={20} />
+                  </button>
                 </div>
               </div>
-            )}
-          </div>
+
+              <div className="p-4 overflow-y-auto space-y-4">
+                <div className="grid grid-cols-1 gap-2 text-sm">
+                  <div className="rounded-lg border border-gray-200 bg-white px-3 py-2">
+                    <p className="text-xs text-gray-500">현재 과목</p>
+                    <p className="font-bold text-gray-800">{quickEditorCurrentCell?.subject || '빈칸'}</p>
+                  </div>
+                  <div className="rounded-lg border border-gray-200 bg-white px-3 py-2">
+                    <p className="text-xs text-gray-500">전담 교사</p>
+                    <p className="font-bold text-gray-800">{quickEditorCurrentCell?.teacher || '-'}</p>
+                  </div>
+                  <div className="rounded-lg border border-gray-200 bg-white px-3 py-2">
+                    <p className="text-xs text-gray-500">장소/비고</p>
+                    <p className="font-bold text-gray-800">{quickEditorCurrentCell?.location || '-'}</p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => setQuickEditorAction('subject')}
+                    className={`px-3 py-2 rounded-lg font-bold text-sm border ${quickEditorAction === 'subject' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'}`}
+                  >
+                    과목 변경
+                  </button>
+                  <button
+                    onClick={() => setQuickEditorAction('swap')}
+                    className={`px-3 py-2 rounded-lg font-bold text-sm border ${quickEditorAction === 'swap' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'}`}
+                  >
+                    교환
+                  </button>
+                  <button
+                    onClick={() => setQuickEditorAction('move')}
+                    className={`px-3 py-2 rounded-lg font-bold text-sm border ${quickEditorAction === 'move' ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'}`}
+                  >
+                    이동
+                  </button>
+                  <button
+                    onClick={() => handleDirectSubjectChange('')}
+                    className="px-3 py-2 rounded-lg font-bold text-sm border border-red-300 bg-red-50 text-red-700 hover:bg-red-100"
+                  >
+                    삭제(빈칸)
+                  </button>
+                  <button
+                    onClick={handleUndo}
+                    disabled={undoStack.length === 0}
+                    className="col-span-2 px-3 py-2 rounded-lg font-bold text-sm border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    되돌리기
+                  </button>
+                </div>
+
+                <p className="text-xs text-gray-500">{quickEditorActionGuideText}</p>
+
+                {(() => {
+                  const hasMismatch = isCellMismatchedWithTemplate(selectedCell.className, selectedCell.p, selectedCell.d, quickEditorCurrentCell);
+                  const hasOverlap = hasTeacherOverlapConflict(selectedCell.weekName, selectedCell.className, selectedCell.p, selectedCell.d, quickEditorCurrentCell);
+                  const hasForcedConflict = Boolean(quickEditorCurrentCell?.forcedConflict);
+                  if (!hasMismatch && !hasOverlap && !hasForcedConflict) return null;
+
+                  return (
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      {hasMismatch && (
+                        <span className="px-2 py-1 rounded bg-blue-50 text-blue-700 border border-blue-200 font-semibold">파란 테두리 원인: 전담 템플릿 불일치</span>
+                      )}
+                      {(hasOverlap || hasForcedConflict) && (
+                        <span className="px-2 py-1 rounded bg-rose-50 text-rose-700 border border-rose-200 font-semibold">빨간 테두리 원인: 전담 중복 배치 또는 강제 이동</span>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <Edit2 className="text-yellow-500" size={16} />
+                    <span className="text-sm font-semibold text-gray-600">과목 변경</span>
+                  </div>
+                  <select
+                    value={selectedSubjectOptionValue}
+                    onChange={(e) => handleDirectSubjectChange(e.target.value)}
+                    className="w-full border border-gray-300 p-2 rounded-md shadow-inner focus:outline-none focus:ring-2 focus:ring-yellow-500 bg-gray-50 font-bold text-gray-700"
+                  >
+                    <option value="" disabled>-- 과목 선택 --</option>
+                    {SUBJECT_SELECT_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-gray-400">과학/체육/음악은 전담/담임 선택 가능</p>
+                </div>
+
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <MapPin className="text-gray-400" size={16} />
+                    <span className="text-sm font-semibold text-gray-600">장소/비고</span>
+                  </div>
+                  <input
+                    type="text"
+                    value={selectedCell.location || ''}
+                    onChange={(e) => handleLocationChange(e.target.value)}
+                    placeholder="비고나 장소 입력"
+                    disabled={isSelectedHolidayCell}
+                    className="w-full border border-gray-300 p-2 rounded-md shadow-inner focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm disabled:bg-gray-100 disabled:text-gray-400"
+                  />
+                </div>
+
+                <div className="text-xs text-gray-400">
+                  {quickEditorAction === 'swap' ? '교환할 수업 칸을 클릭하세요.' : quickEditorAction === 'move' ? '이동할 빈칸을 클릭하세요.' : '셀을 다시 클릭해 선택 해제할 수 있습니다.'}
+                </div>
+
+                {selectedCellRecommendations && (
+                  <div className="grid grid-cols-1 gap-3 text-xs">
+                    <div className="border border-emerald-200 rounded-lg p-3 bg-emerald-50/60">
+                      <p className="font-bold text-emerald-800 mb-2">가능한 이동 칸 (빈칸 우선)</p>
+                      {selectedCellRecommendations.moveTargets.length > 0 ? (
+                        <ul className="space-y-1 text-emerald-900">
+                          {selectedCellRecommendations.moveTargets.slice(0, 8).map((item) => (
+                            <li key={`move-${item.slotLabel}`}>✅ {item.slotLabel} ({item.reason})</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="text-emerald-700">이동 가능한 빈칸이 없습니다.</p>
+                      )}
+                    </div>
+
+                    <div className="border border-blue-200 rounded-lg p-3 bg-blue-50/60">
+                      <p className="font-bold text-blue-800 mb-2">가능한 교환 칸</p>
+                      {selectedCellRecommendations.swapTargets.length > 0 ? (
+                        <ul className="space-y-1 text-blue-900">
+                          {selectedCellRecommendations.swapTargets.slice(0, 8).map((item) => (
+                            <li key={`swap-${item.slotLabel}`}>✅ {item.slotLabel} ({item.reason})</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="text-blue-700">교환 가능한 칸이 없습니다.</p>
+                      )}
+                    </div>
+
+                    <div className="border border-red-200 rounded-lg p-3 bg-red-50/60">
+                      <p className="font-bold text-red-800 mb-2">불가 사유</p>
+                      {selectedCellRecommendations.blockedTargets.length > 0 ? (
+                        <ul className="space-y-1 text-red-900">
+                          {selectedCellRecommendations.blockedTargets.slice(0, 6).map((item) => (
+                            <li key={`blocked-${item.slotLabel}`}>❌ {item.slotLabel} ({item.reason})</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="text-red-700">불가한 칸이 없습니다.</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </aside>
+          </>
         )}
 
         {viewMode === 'weekly' && showChangeSummary && (
@@ -2710,7 +2803,7 @@ export default function TimetableApp() {
         )}
 
         {toast.show && (
-          <div className={`fixed top-6 left-1/2 transform -translate-x-1/2 z-50 px-6 py-3 rounded-full shadow-lg flex items-center gap-2 animate-bounce ${toast.type === 'error' ? 'bg-red-600 text-white' : toast.type === 'info' ? 'bg-blue-600 text-white' : 'bg-green-600 text-white'}`}>
+          <div className={`fixed top-6 left-1/2 transform -translate-x-1/2 z-[80] px-6 py-3 rounded-full shadow-lg flex items-center gap-2 animate-bounce ${toast.type === 'error' ? 'bg-red-600 text-white' : toast.type === 'info' ? 'bg-blue-600 text-white' : 'bg-green-600 text-white'}`}>
             {toast.type === 'error' ? <AlertCircle size={20} /> : toast.type === 'info' ? <Info size={20} /> : <CheckCircle size={20} />}
             <span className="font-semibold">{toast.message}</span>
             {toast.actionType === 'undo' && (
