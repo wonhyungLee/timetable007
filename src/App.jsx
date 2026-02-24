@@ -135,8 +135,9 @@ const isHolidayCell = (cell) => cell?.type === 'holiday' || cell?.subject === '�
 const isSpecialLikeCell = (cell) => {
   if (!cell || isHolidayCell(cell)) return false;
   if (cell.type === 'special') return true;
-  if (cell.teacherId) return true;
-  return Boolean((cell.teacher || '').trim());
+  // 레거시 데이터에서 type이 비어 있고 teacherId만 남아있는 경우만 전담으로 간주
+  if (!cell.type && cell.teacherId) return true;
+  return false;
 };
 
 const getTimetableCellColor = (cell) => {
@@ -508,6 +509,13 @@ export default function TimetableApp() {
   const isSpecialSelectionForSwapHint = isSpecialLikeCell(liveSelectedCell || selectedCell);
   const selectedSubjectOptionValue = selectedCell ? getSubjectSelectionValueForCell(selectedCell) : '';
   const hasTeacherHighlightFilter = highlightTeacherIds.length > 0;
+  const teacherClassNameSetMap = useMemo(() => {
+    const map = {};
+    teacherConfigs.forEach((teacher) => {
+      map[teacher.id] = new Set((teacher.classes || []).map((num) => `${num}반`));
+    });
+    return map;
+  }, [teacherConfigs]);
   const templateExpectationMap = useMemo(() => {
     const map = {};
     CLASSES.forEach((className) => {
@@ -1069,27 +1077,272 @@ export default function TimetableApp() {
     return `[안내] [${weekName}] ${DAYS[dayIndex]} ${PERIODS[periodIndex]}교시 ${className} 수업이 전담 템플릿과 달라 파란색 테두리로 표시됩니다.`;
   };
 
-  const getSpecialTemplateTargetClassName = (teacherId, periodIndex, dayIndex) => {
-    if (!teacherId) return '';
-    const template = normalizedSpecialTemplates?.[teacherId];
-    return template?.[periodIndex]?.[dayIndex]?.className || '';
+  const getTeacherNameById = (teacherId) =>
+    teacherConfigs.find((teacher) => teacher.id === teacherId)?.name || '전담교사';
+
+  const findTeacherConflictClassesAtSlot = (
+    schedulesMap,
+    weekName,
+    periodIndex,
+    dayIndex,
+    teacherId,
+    ignorePositions = []
+  ) => {
+    if (!teacherId) return [];
+    const weekSchedule = schedulesMap?.[weekName];
+    if (!weekSchedule) return [];
+
+    const ignored = new Set(
+      ignorePositions.map((position) =>
+        `${position.weekName}|${position.className}|${position.p}|${position.d}`
+      )
+    );
+
+    return CLASSES.filter((cls) => {
+      const key = `${weekName}|${cls}|${periodIndex}|${dayIndex}`;
+      if (ignored.has(key)) return false;
+      const cell = weekSchedule?.[cls]?.[periodIndex]?.[dayIndex];
+      return isSpecialLikeCell(cell) && cell.teacherId === teacherId;
+    });
   };
 
-  const buildSpecialMoveGuideMessage = (sourceMeta, sourceCell, targetMeta) => {
-    const teacherName = sourceCell?.teacher || '전담교사';
-    const subjectName = sourceCell?.subject || '전담수업';
-    const expectedClassName = getSpecialTemplateTargetClassName(sourceCell?.teacherId, sourceMeta.p, sourceMeta.d);
-
-    const header = `전담 수업은 직접 이동할 수 없습니다.`;
-    const fromLine = `현재 선택: [${sourceMeta.weekName}] ${sourceMeta.className} ${DAYS[sourceMeta.d]}요일 ${PERIODS[sourceMeta.p]}교시 ${subjectName} (${teacherName})`;
-    const targetLine = `선택한 대상: [${targetMeta.weekName}] ${targetMeta.className} ${DAYS[targetMeta.d]}요일 ${PERIODS[targetMeta.p]}교시`;
-
-    if (expectedClassName) {
-      const guideLine = `템플릿 권장: ${expectedClassName} ${DAYS[sourceMeta.d]}요일 ${PERIODS[sourceMeta.p]}교시 ${subjectName}`;
-      return `${header}\n\n${fromLine}\n${targetLine}\n\n${guideLine}\n\n설정 > 전담 시간표 템플릿에서 수정 후 '전담 시간표 템플릿 배정'을 실행하세요.`;
+  const evaluateSpecialSwapTarget = (
+    sourceMeta,
+    sourceCell,
+    targetMeta,
+    targetCell,
+    schedulesMap = allSchedules
+  ) => {
+    if (!sourceCell || !isSpecialLikeCell(sourceCell)) {
+      return { canSwap: true, blockReason: '', details: {} };
     }
 
-    return `${header}\n\n${fromLine}\n${targetLine}\n\n해당 시간의 템플릿 권장 학급이 없습니다.\n설정 > 전담 시간표 템플릿을 먼저 확인하세요.`;
+    if (isHolidayCell(sourceCell) || isHolidayCell(targetCell)) {
+      return { canSwap: false, blockReason: 'holiday', details: {} };
+    }
+
+    const sourceTeacherId = sourceCell.teacherId;
+    if (!sourceTeacherId) {
+      return { canSwap: false, blockReason: 'missing_teacher', details: {} };
+    }
+
+    const sourceAllowedClasses = teacherClassNameSetMap[sourceTeacherId];
+    if (sourceAllowedClasses && sourceAllowedClasses.size > 0 && !sourceAllowedClasses.has(targetMeta.className)) {
+      return {
+        canSwap: false,
+        blockReason: 'teacher_class_mismatch',
+        details: { teacherId: sourceTeacherId }
+      };
+    }
+
+    const ignorePositions = [sourceMeta, targetMeta];
+    const sourceTeacherConflicts = findTeacherConflictClassesAtSlot(
+      schedulesMap,
+      targetMeta.weekName,
+      targetMeta.p,
+      targetMeta.d,
+      sourceTeacherId,
+      ignorePositions
+    );
+    if (sourceTeacherConflicts.length > 0) {
+      return {
+        canSwap: false,
+        blockReason: 'source_teacher_busy',
+        details: {
+          teacherId: sourceTeacherId,
+          conflictClasses: sourceTeacherConflicts
+        }
+      };
+    }
+
+    if (isSpecialLikeCell(targetCell) && targetCell.teacherId) {
+      const targetTeacherId = targetCell.teacherId;
+      if (targetTeacherId !== sourceTeacherId) {
+        const targetAllowedClasses = teacherClassNameSetMap[targetTeacherId];
+        if (targetAllowedClasses && targetAllowedClasses.size > 0 && !targetAllowedClasses.has(sourceMeta.className)) {
+          return {
+            canSwap: false,
+            blockReason: 'target_teacher_class_mismatch',
+            details: { teacherId: targetTeacherId }
+          };
+        }
+      }
+
+      const targetTeacherConflicts = findTeacherConflictClassesAtSlot(
+        schedulesMap,
+        sourceMeta.weekName,
+        sourceMeta.p,
+        sourceMeta.d,
+        targetTeacherId,
+        ignorePositions
+      );
+      if (targetTeacherConflicts.length > 0) {
+        return {
+          canSwap: false,
+          blockReason: 'target_teacher_busy',
+          details: {
+            teacherId: targetTeacherId,
+            conflictClasses: targetTeacherConflicts
+          }
+        };
+      }
+    }
+
+    return { canSwap: true, blockReason: '', details: {} };
+  };
+
+  const findAvailableSpecialSwapTargets = (
+    sourceMeta,
+    sourceCell,
+    preferredWeekName,
+    preferredClassName,
+    maxResults = 8
+  ) => {
+    if (!sourceMeta || !sourceCell?.teacherId) return [];
+
+    const candidateWeekNames = [];
+    if (preferredWeekName && allSchedules?.[preferredWeekName]) {
+      candidateWeekNames.push(preferredWeekName);
+    }
+    if (
+      sourceMeta.weekName &&
+      allSchedules?.[sourceMeta.weekName] &&
+      !candidateWeekNames.includes(sourceMeta.weekName)
+    ) {
+      candidateWeekNames.push(sourceMeta.weekName);
+    }
+
+    const sourceAllowedClasses = teacherClassNameSetMap[sourceCell.teacherId];
+    const candidateClasses =
+      sourceAllowedClasses && sourceAllowedClasses.size > 0
+        ? CLASSES.filter((cls) => sourceAllowedClasses.has(cls))
+        : CLASSES;
+
+    const getClassOrder = (className) => {
+      const parsed = Number.parseInt(String(className).replace('반', ''), 10);
+      return Number.isFinite(parsed) ? parsed : 999;
+    };
+
+    const candidates = [];
+    candidateWeekNames.forEach((weekName, weekPriority) => {
+      candidateClasses.forEach((className) => {
+        for (let p = 0; p < PERIODS.length; p++) {
+          for (let d = 0; d < DAYS.length; d++) {
+            if (
+              weekName === sourceMeta.weekName &&
+              className === sourceMeta.className &&
+              p === sourceMeta.p &&
+              d === sourceMeta.d
+            ) {
+              continue;
+            }
+
+            const targetCellForCandidate = allSchedules?.[weekName]?.[className]?.[p]?.[d];
+            if (!targetCellForCandidate) continue;
+
+            const evaluation = evaluateSpecialSwapTarget(
+              sourceMeta,
+              sourceCell,
+              { weekName, className, p, d },
+              targetCellForCandidate
+            );
+            if (!evaluation.canSwap) continue;
+
+            const sameClassPriority = preferredClassName && className === preferredClassName ? 0 : 1;
+            const distance = Math.abs(p - sourceMeta.p) + Math.abs(d - sourceMeta.d);
+
+            candidates.push({
+              weekName,
+              className,
+              p,
+              d,
+              weekPriority,
+              sameClassPriority,
+              distance,
+              classOrder: getClassOrder(className)
+            });
+          }
+        }
+      });
+    });
+
+    return candidates
+      .sort((a, b) =>
+        a.weekPriority - b.weekPriority ||
+        a.sameClassPriority - b.sameClassPriority ||
+        a.distance - b.distance ||
+        a.classOrder - b.classOrder ||
+        a.d - b.d ||
+        a.p - b.p
+      )
+      .slice(0, maxResults);
+  };
+
+  const getSpecialSwapBlockLabel = (blockReason) => {
+    if (blockReason === 'source_teacher_busy' || blockReason === 'target_teacher_busy') return '교사 수업중';
+    if (blockReason === 'teacher_class_mismatch' || blockReason === 'target_teacher_class_mismatch') return '담당학급 아님';
+    if (blockReason === 'missing_teacher') return '교사 정보 없음';
+    return '이동불가';
+  };
+
+  const getSpecialSwapBlockReasonText = (evaluation, sourceCell) => {
+    const blockReason = evaluation?.blockReason || '';
+    const details = evaluation?.details || {};
+
+    if (blockReason === 'holiday') {
+      return '휴업일 칸은 수업 이동 대상이 아닙니다.';
+    }
+    if (blockReason === 'missing_teacher') {
+      return '전담 교사 정보가 없어 이동 가능 시간을 계산할 수 없습니다.';
+    }
+    if (blockReason === 'teacher_class_mismatch') {
+      const teacherName = sourceCell?.teacher || getTeacherNameById(sourceCell?.teacherId);
+      return `${teacherName} 선생님의 담당 학급이 아닙니다.`;
+    }
+    if (blockReason === 'target_teacher_class_mismatch') {
+      return `교환 대상 전담(${getTeacherNameById(details.teacherId)})을 현재 학급으로 옮길 수 없습니다.`;
+    }
+    if (blockReason === 'source_teacher_busy') {
+      const teacherName = sourceCell?.teacher || getTeacherNameById(sourceCell?.teacherId);
+      const overlapClasses = Array.isArray(details.conflictClasses) ? details.conflictClasses : [];
+      return overlapClasses.length > 0
+        ? `${teacherName} 선생님이 해당 시간에 ${overlapClasses.join(', ')} 수업 중입니다.`
+        : `${teacherName} 선생님이 해당 시간에 이미 수업 중입니다.`;
+    }
+    if (blockReason === 'target_teacher_busy') {
+      const overlapClasses = Array.isArray(details.conflictClasses) ? details.conflictClasses : [];
+      const targetTeacherName = getTeacherNameById(details.teacherId);
+      return overlapClasses.length > 0
+        ? `교환 대상 전담(${targetTeacherName})이 원래 시간에 ${overlapClasses.join(', ')} 수업 중입니다.`
+        : `교환 대상 전담(${targetTeacherName})이 원래 시간으로 이동할 수 없습니다.`;
+    }
+    return '현재 조건에서는 이동할 수 없습니다.';
+  };
+
+  const buildSpecialMoveGuideMessage = (sourceMeta, sourceCell, targetMeta, evaluation) => {
+    const teacherName = sourceCell?.teacher || getTeacherNameById(sourceCell?.teacherId);
+    const subjectName = sourceCell?.subject || '전담수업';
+    const fromLine = `현재 선택: [${sourceMeta.weekName}] ${sourceMeta.className} ${DAYS[sourceMeta.d]}요일 ${PERIODS[sourceMeta.p]}교시 ${subjectName} (${teacherName})`;
+    const targetLine = `선택한 대상: [${targetMeta.weekName}] ${targetMeta.className} ${DAYS[targetMeta.d]}요일 ${PERIODS[targetMeta.p]}교시`;
+    const reasonLine = `이동 불가 사유: ${getSpecialSwapBlockReasonText(evaluation, sourceCell)}`;
+
+    const availableTargets = findAvailableSpecialSwapTargets(
+      sourceMeta,
+      sourceCell,
+      targetMeta.weekName,
+      targetMeta.className,
+      8
+    );
+
+    if (availableTargets.length === 0) {
+      return `전담 수업 이동 안내\n\n${fromLine}\n${targetLine}\n\n${reasonLine}\n\n${teacherName} 선생님 기준으로 현재 이동 가능한 시간이 없습니다.`;
+    }
+
+    const candidateLines = availableTargets.map((slot, idx) =>
+      `${idx + 1}. [${slot.weekName}] ${slot.className} ${DAYS[slot.d]}요일 ${PERIODS[slot.p]}교시`
+    );
+
+    return `전담 수업 이동 안내\n\n${fromLine}\n${targetLine}\n\n${reasonLine}\n\n${teacherName} 선생님 기준 이동 가능 시간:\n${candidateLines.join('\n')}`;
   };
 
   const getConflictBorderClassName = (hasTemplateMismatch, hasTeacherConflict) => {
@@ -1104,7 +1357,8 @@ export default function TimetableApp() {
         active: false,
         isSelectedTarget: false,
         canSwap: true,
-        blockReason: ''
+        blockReason: '',
+        highlightReason: ''
       };
     }
 
@@ -1119,7 +1373,8 @@ export default function TimetableApp() {
         active: false,
         isSelectedTarget: true,
         canSwap: true,
-        blockReason: ''
+        blockReason: '',
+        highlightReason: ''
       };
     }
 
@@ -1133,29 +1388,26 @@ export default function TimetableApp() {
         active: false,
         isSelectedTarget: false,
         canSwap: true,
-        blockReason: ''
+        blockReason: '',
+        highlightReason: ''
       };
     }
 
-    const expectedClassName = getSpecialTemplateTargetClassName(sourceCell?.teacherId, selectedCell.p, selectedCell.d);
-    const isRecommendedTarget =
-      selectedCell.weekName === weekName &&
-      selectedCell.p === periodIndex &&
-      selectedCell.d === dayIndex &&
-      Boolean(expectedClassName) &&
-      className === expectedClassName;
-
-    const blockedByHoliday = isHolidayCell(sourceCell) || isHolidayCell(targetCell);
+    const sourceMeta = {
+      weekName: selectedCell.weekName,
+      className: selectedCell.className,
+      p: selectedCell.p,
+      d: selectedCell.d
+    };
+    const targetMeta = { weekName, className, p: periodIndex, d: dayIndex };
+    const evaluation = evaluateSpecialSwapTarget(sourceMeta, sourceCell, targetMeta, targetCell);
 
     return {
       active: true,
       isSelectedTarget: false,
-      canSwap: false,
-      blockReason: blockedByHoliday
-        ? 'holiday'
-        : isRecommendedTarget
-          ? 'special_recommended_target'
-          : 'special_move_locked'
+      canSwap: evaluation.canSwap,
+      blockReason: evaluation.blockReason,
+      highlightReason: evaluation.canSwap ? 'special_teacher_available' : ''
     };
   };
 
@@ -1242,25 +1494,24 @@ export default function TimetableApp() {
       setSelectedCell({ weekName: wName, className: cName, p, d, ...clickedCell });
     } else {
       const sourceCellCurrent = allSchedules[selectedCell.weekName][selectedCell.className][selectedCell.p][selectedCell.d];
+      const sourceMeta = {
+        weekName: selectedCell.weekName,
+        className: selectedCell.className,
+        p: selectedCell.p,
+        d: selectedCell.d
+      };
+      const targetMeta = {
+        weekName: wName,
+        className: cName,
+        p,
+        d
+      };
       if (isSpecialLikeCell(sourceCellCurrent)) {
-        window.alert(
-          buildSpecialMoveGuideMessage(
-            {
-              weekName: selectedCell.weekName,
-              className: selectedCell.className,
-              p: selectedCell.p,
-              d: selectedCell.d
-            },
-            sourceCellCurrent,
-            {
-              weekName: wName,
-              className: cName,
-              p,
-              d
-            }
-          )
-        );
-        return;
+        const evaluation = evaluateSpecialSwapTarget(sourceMeta, sourceCellCurrent, targetMeta, clickedCell);
+        if (!evaluation.canSwap) {
+          window.alert(buildSpecialMoveGuideMessage(sourceMeta, sourceCellCurrent, targetMeta, evaluation));
+          return;
+        }
       }
 
       if (isHolidayCell(sourceCellCurrent) || isHolidayCell(clickedCell)) {
@@ -1269,7 +1520,11 @@ export default function TimetableApp() {
         return;
       }
 
-      const validation = isSwapValid(selectedCell, wName, cName, p, d);
+      const sourceCellForValidation = {
+        ...sourceCellCurrent,
+        ...sourceMeta
+      };
+      const validation = isSwapValid(sourceCellForValidation, wName, cName, p, d);
       
       const newAllSchedules = { ...allSchedules };
       const w1 = selectedCell.weekName; const c1 = selectedCell.className; const p1 = selectedCell.p; const d1 = selectedCell.d;
@@ -1578,27 +1833,27 @@ export default function TimetableApp() {
 
     let overlay = null;
     if (selectedCell && !isSelected) {
-      if (swapTargetState.active && !swapTargetState.canSwap) {
-        if (swapTargetState.blockReason === 'special_recommended_target') {
-          baseStyle += "ring-2 ring-inset ring-sky-500 bg-sky-100 ";
+      if (swapTargetState.active) {
+        if (swapTargetState.canSwap && swapTargetState.highlightReason === 'special_teacher_available') {
+          baseStyle += "ring-2 ring-inset ring-emerald-500 bg-emerald-50 ";
           overlay = (
-            <div className="absolute inset-0 bg-sky-500 bg-opacity-20 flex items-center justify-center z-20">
-              <span className="text-[11px] font-bold text-sky-900 tracking-wide">권장 대상</span>
+            <div className="absolute inset-0 bg-emerald-500/10 flex items-center justify-center z-20">
+              <span className="text-[11px] font-bold text-emerald-900 tracking-wide">이동가능</span>
             </div>
           );
-        } else if (swapTargetState.blockReason === 'holiday') {
+        } else if (!swapTargetState.canSwap && swapTargetState.blockReason === 'holiday') {
           baseStyle += "opacity-60 cursor-not-allowed ";
           overlay = <div className="absolute inset-0 bg-red-500 bg-opacity-20 flex items-center justify-center z-20"><X className="text-red-600 w-8 h-8 opacity-70" /></div>;
-        } else {
+        } else if (!swapTargetState.canSwap) {
           baseStyle += "opacity-60 cursor-not-allowed ";
           overlay = (
             <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20">
-              <span className="text-[11px] font-bold text-white tracking-wide">직접 이동 불가</span>
+              <span className="text-[10px] font-bold text-white tracking-wide">{getSpecialSwapBlockLabel(swapTargetState.blockReason)}</span>
             </div>
           );
+        } else {
+          baseStyle += "hover:ring-2 hover:ring-blue-400 hover:scale-105 z-10 ";
         }
-      } else {
-        baseStyle += "hover:ring-2 hover:ring-blue-400 hover:scale-105 z-10 ";
       }
     }
     return { style: baseStyle, overlay };
@@ -1650,19 +1905,19 @@ export default function TimetableApp() {
 
     let overlay = null;
     if (selectedCell && !isSelected) {
-      if (swapTargetState.active && !swapTargetState.canSwap) {
-        if (swapTargetState.blockReason === 'special_recommended_target') {
-          baseStyle += 'ring-2 ring-inset ring-sky-500 bg-sky-100 ';
-          overlay = <div className="absolute inset-0 bg-sky-500 bg-opacity-20 flex items-center justify-center z-20"><span className="text-[8px] font-bold text-sky-900">권장</span></div>;
-        } else if (swapTargetState.blockReason === 'holiday') {
+      if (swapTargetState.active) {
+        if (swapTargetState.canSwap && swapTargetState.highlightReason === 'special_teacher_available') {
+          baseStyle += 'ring-2 ring-inset ring-emerald-500 bg-emerald-50 ';
+          overlay = <div className="absolute inset-0 bg-emerald-500/10 flex items-center justify-center z-20"><span className="text-[8px] font-bold text-emerald-900">가능</span></div>;
+        } else if (!swapTargetState.canSwap && swapTargetState.blockReason === 'holiday') {
           baseStyle += 'opacity-60 cursor-not-allowed ';
           overlay = <div className="absolute inset-0 bg-red-500/20 flex items-center justify-center z-20"><X className="text-red-600 w-4 h-4 opacity-70" /></div>;
-        } else {
+        } else if (!swapTargetState.canSwap) {
           baseStyle += 'opacity-60 cursor-not-allowed ';
-          overlay = <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20"><span className="text-[8px] font-bold text-white">이동불가</span></div>;
+          overlay = <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20"><span className="text-[8px] font-bold text-white">{getSpecialSwapBlockLabel(swapTargetState.blockReason)}</span></div>;
+        } else {
+          baseStyle += 'hover:ring-2 hover:ring-blue-300 hover:scale-[1.02] ';
         }
-      } else {
-        baseStyle += 'hover:ring-2 hover:ring-blue-300 hover:scale-[1.02] ';
       }
     }
 
@@ -1786,27 +2041,27 @@ export default function TimetableApp() {
 
     let overlay = null;
     if (selectedCell && !isSelected) {
-      if (swapTargetState.active && !swapTargetState.canSwap) {
-        if (swapTargetState.blockReason === 'special_recommended_target') {
-          baseStyle += dense ? 'ring-1 ring-inset ring-sky-500 bg-sky-100 ' : 'ring-2 ring-inset ring-sky-500 bg-sky-100 ';
+      if (swapTargetState.active) {
+        if (swapTargetState.canSwap && swapTargetState.highlightReason === 'special_teacher_available') {
+          baseStyle += dense ? 'ring-1 ring-inset ring-emerald-500 bg-emerald-50 ' : 'ring-2 ring-inset ring-emerald-500 bg-emerald-50 ';
           overlay = (
-            <div className="absolute inset-0 bg-sky-500 bg-opacity-20 flex items-center justify-center z-20">
-              <span className={`${dense ? 'text-[7px]' : 'text-[10px]'} font-bold text-sky-900`}>권장</span>
+            <div className="absolute inset-0 bg-emerald-500/10 flex items-center justify-center z-20">
+              <span className={`${dense ? 'text-[7px]' : 'text-[10px]'} font-bold text-emerald-900`}>가능</span>
             </div>
           );
-        } else if (swapTargetState.blockReason === 'holiday') {
+        } else if (!swapTargetState.canSwap && swapTargetState.blockReason === 'holiday') {
           baseStyle += 'opacity-60 cursor-not-allowed ';
           overlay = <div className="absolute inset-0 bg-red-500/20 flex items-center justify-center z-20"><X className={`text-red-600 ${dense ? 'w-3 h-3' : 'w-4 h-4'} opacity-70`} /></div>;
-        } else {
+        } else if (!swapTargetState.canSwap) {
           baseStyle += 'opacity-60 cursor-not-allowed ';
           overlay = (
             <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20">
-              <span className={`${dense ? 'text-[7px]' : 'text-[10px]'} font-bold text-white`}>이동불가</span>
+              <span className={`${dense ? 'text-[7px]' : 'text-[10px]'} font-bold text-white`}>{getSpecialSwapBlockLabel(swapTargetState.blockReason)}</span>
             </div>
           );
+        } else {
+          baseStyle += dense ? 'hover:ring-1 hover:ring-blue-300 ' : 'hover:ring-2 hover:ring-blue-300 hover:scale-[1.01] ';
         }
-      } else {
-        baseStyle += dense ? 'hover:ring-1 hover:ring-blue-300 ' : 'hover:ring-2 hover:ring-blue-300 hover:scale-[1.01] ';
       }
     }
 
@@ -2055,10 +2310,10 @@ export default function TimetableApp() {
 
             {isSpecialSelectionForSwapHint && (
               <div className="flex flex-wrap items-center gap-2 text-xs">
-                <span className="px-2 py-1 rounded bg-sky-50 text-sky-700 border border-sky-200 font-semibold">파란 표시: 템플릿 권장 대상</span>
-                <span className="px-2 py-1 rounded bg-gray-900 text-white border border-gray-800 font-semibold">검정 오버레이: 전담 직접 이동 불가</span>
+                <span className="px-2 py-1 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold">초록 표시: 선택 전담 교사 기준 이동 가능 시간</span>
+                <span className="px-2 py-1 rounded bg-gray-900 text-white border border-gray-800 font-semibold">검정 오버레이: 교사 조건 불충족(수업 중/담당학급 아님)</span>
                 <span className="px-2 py-1 rounded bg-red-50 text-red-700 border border-red-200 font-semibold">X 오버레이: 휴업일(이동 불가)</span>
-                <span className="px-2 py-1 rounded bg-indigo-50 text-indigo-700 border border-indigo-200 font-semibold">다른 칸 클릭 시 이동 안내 팝업 표시</span>
+                <span className="px-2 py-1 rounded bg-indigo-50 text-indigo-700 border border-indigo-200 font-semibold">이동 불가 칸 클릭 시 가능한 시간 안내 팝업 표시</span>
               </div>
             )}
 
@@ -2344,19 +2599,19 @@ export default function TimetableApp() {
 
                               let overlay = null;
                               if (selectedCell && !isSelected) {
-                                if (swapTargetState.active && !swapTargetState.canSwap) {
-                                  if (swapTargetState.blockReason === 'special_recommended_target') {
-                                    cellClass += "ring-2 ring-inset ring-sky-500 bg-sky-100 ";
-                                    overlay = <div className="absolute inset-0 bg-sky-500 bg-opacity-20 flex items-center justify-center z-20"><span className="text-[9px] font-bold text-sky-900">권장</span></div>;
-                                  } else if (swapTargetState.blockReason === 'holiday') {
+                                if (swapTargetState.active) {
+                                  if (swapTargetState.canSwap && swapTargetState.highlightReason === 'special_teacher_available') {
+                                    cellClass += "ring-2 ring-inset ring-emerald-500 bg-emerald-50 ";
+                                    overlay = <div className="absolute inset-0 bg-emerald-500/10 flex items-center justify-center z-20"><span className="text-[9px] font-bold text-emerald-900">가능</span></div>;
+                                  } else if (!swapTargetState.canSwap && swapTargetState.blockReason === 'holiday') {
                                     cellClass += "opacity-60 cursor-not-allowed ";
                                     overlay = <div className="absolute inset-0 bg-red-500 bg-opacity-20 flex items-center justify-center z-20"><X className="text-red-600 w-5 h-5 opacity-70" /></div>;
-                                  } else {
+                                  } else if (!swapTargetState.canSwap) {
                                     cellClass += "opacity-60 cursor-not-allowed ";
-                                    overlay = <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20"><span className="text-[9px] font-bold text-white">이동불가</span></div>;
+                                    overlay = <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20"><span className="text-[9px] font-bold text-white">{getSpecialSwapBlockLabel(swapTargetState.blockReason)}</span></div>;
+                                  } else {
+                                    cellClass += "hover:ring-2 hover:ring-blue-400 hover:scale-105 z-10 ";
                                   }
-                                } else {
-                                  cellClass += "hover:ring-2 hover:ring-blue-400 hover:scale-105 z-10 ";
                                 }
                               }
                               
