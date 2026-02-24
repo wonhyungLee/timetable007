@@ -286,6 +286,7 @@ const normalizeSpecialTemplates = (teachers, templates = {}) => {
 const createHomeroomFallbackCell = (className, periodIndex, dayIndex) => ({
   subject: DEFAULT_HOMEROOM_SUBJECTS[(periodIndex + dayIndex) % DEFAULT_HOMEROOM_SUBJECTS.length],
   type: 'homeroom',
+  forcedConflict: false,
   location: '',
   id: `${className}-${periodIndex}-${dayIndex}`
 });
@@ -360,7 +361,12 @@ const normalizeAllSchedulesForSync = (sourceAllSchedules, fallbackAllSchedules) 
             : createHomeroomFallbackCell(className, pIdx, dIdx);
           const rawCell = sourceGrid?.[pIdx]?.[dIdx];
 
-          if (!isPlainObject(rawCell)) return fallbackCell;
+          if (!isPlainObject(rawCell)) {
+            return {
+              ...fallbackCell,
+              forcedConflict: Boolean(fallbackCell.forcedConflict)
+            };
+          }
 
           const subject = typeof rawCell.subject === 'string'
             ? rawCell.subject
@@ -377,6 +383,7 @@ const normalizeAllSchedulesForSync = (sourceAllSchedules, fallbackAllSchedules) 
             teacherId: rawCell.teacherId ?? null,
             teacher: typeof rawCell.teacher === 'string' ? rawCell.teacher : (fallbackCell.teacher || ''),
             location: typeof rawCell.location === 'string' ? rawCell.location : (fallbackCell.location || ''),
+            forcedConflict: Boolean(rawCell.forcedConflict),
             id: typeof rawCell.id === 'string' ? rawCell.id : `${className}-${pIdx}-${dIdx}`
           };
         })
@@ -844,6 +851,7 @@ export default function TimetableApp() {
               type: 'special',
               teacher: teacher.name,
               teacherId: teacher.id,
+              forcedConflict: false,
               location: (templateCell.location || '').trim() || getDefaultLocation(teacher.subject, d, p),
               id: `${targetClass}-${p}-${d}-special`
             };
@@ -1191,100 +1199,6 @@ export default function TimetableApp() {
     return { canSwap: true, blockReason: '', details: {} };
   };
 
-  const findAvailableSpecialSwapTargets = (
-    sourceMeta,
-    sourceCell,
-    preferredWeekName,
-    preferredClassName,
-    maxResults = 8
-  ) => {
-    if (!sourceMeta || !sourceCell?.teacherId) return [];
-
-    const candidateWeekNames = [];
-    if (preferredWeekName && allSchedules?.[preferredWeekName]) {
-      candidateWeekNames.push(preferredWeekName);
-    }
-    if (
-      sourceMeta.weekName &&
-      allSchedules?.[sourceMeta.weekName] &&
-      !candidateWeekNames.includes(sourceMeta.weekName)
-    ) {
-      candidateWeekNames.push(sourceMeta.weekName);
-    }
-
-    const sourceAllowedClasses = teacherClassNameSetMap[sourceCell.teacherId];
-    const candidateClasses =
-      sourceAllowedClasses && sourceAllowedClasses.size > 0
-        ? CLASSES.filter((cls) => sourceAllowedClasses.has(cls))
-        : CLASSES;
-
-    const getClassOrder = (className) => {
-      const parsed = Number.parseInt(String(className).replace('반', ''), 10);
-      return Number.isFinite(parsed) ? parsed : 999;
-    };
-
-    const candidates = [];
-    candidateWeekNames.forEach((weekName, weekPriority) => {
-      candidateClasses.forEach((className) => {
-        for (let p = 0; p < PERIODS.length; p++) {
-          for (let d = 0; d < DAYS.length; d++) {
-            if (
-              weekName === sourceMeta.weekName &&
-              className === sourceMeta.className &&
-              p === sourceMeta.p &&
-              d === sourceMeta.d
-            ) {
-              continue;
-            }
-
-            const targetCellForCandidate = allSchedules?.[weekName]?.[className]?.[p]?.[d];
-            if (!targetCellForCandidate) continue;
-
-            const evaluation = evaluateSpecialSwapTarget(
-              sourceMeta,
-              sourceCell,
-              { weekName, className, p, d },
-              targetCellForCandidate
-            );
-            if (!evaluation.canSwap) continue;
-
-            const sameClassPriority = preferredClassName && className === preferredClassName ? 0 : 1;
-            const distance = Math.abs(p - sourceMeta.p) + Math.abs(d - sourceMeta.d);
-
-            candidates.push({
-              weekName,
-              className,
-              p,
-              d,
-              weekPriority,
-              sameClassPriority,
-              distance,
-              classOrder: getClassOrder(className)
-            });
-          }
-        }
-      });
-    });
-
-    return candidates
-      .sort((a, b) =>
-        a.weekPriority - b.weekPriority ||
-        a.sameClassPriority - b.sameClassPriority ||
-        a.distance - b.distance ||
-        a.classOrder - b.classOrder ||
-        a.d - b.d ||
-        a.p - b.p
-      )
-      .slice(0, maxResults);
-  };
-
-  const getSpecialSwapBlockLabel = (blockReason) => {
-    if (blockReason === 'source_teacher_busy' || blockReason === 'target_teacher_busy') return '교사 수업중';
-    if (blockReason === 'teacher_class_mismatch' || blockReason === 'target_teacher_class_mismatch') return '담당학급 아님';
-    if (blockReason === 'missing_teacher') return '교사 정보 없음';
-    return '이동불가';
-  };
-
   const getSpecialSwapBlockReasonText = (evaluation, sourceCell) => {
     const blockReason = evaluation?.blockReason || '';
     const details = evaluation?.details || {};
@@ -1319,34 +1233,18 @@ export default function TimetableApp() {
     return '현재 조건에서는 이동할 수 없습니다.';
   };
 
-  const buildSpecialMoveGuideMessage = (sourceMeta, sourceCell, targetMeta, evaluation) => {
+  const buildSpecialForcedSwapConfirmMessage = (sourceMeta, sourceCell, targetMeta, evaluation) => {
     const teacherName = sourceCell?.teacher || getTeacherNameById(sourceCell?.teacherId);
     const subjectName = sourceCell?.subject || '전담수업';
     const fromLine = `현재 선택: [${sourceMeta.weekName}] ${sourceMeta.className} ${DAYS[sourceMeta.d]}요일 ${PERIODS[sourceMeta.p]}교시 ${subjectName} (${teacherName})`;
     const targetLine = `선택한 대상: [${targetMeta.weekName}] ${targetMeta.className} ${DAYS[targetMeta.d]}요일 ${PERIODS[targetMeta.p]}교시`;
     const reasonLine = `이동 불가 사유: ${getSpecialSwapBlockReasonText(evaluation, sourceCell)}`;
 
-    const availableTargets = findAvailableSpecialSwapTargets(
-      sourceMeta,
-      sourceCell,
-      targetMeta.weekName,
-      targetMeta.className,
-      8
-    );
-
-    if (availableTargets.length === 0) {
-      return `전담 수업 이동 안내\n\n${fromLine}\n${targetLine}\n\n${reasonLine}\n\n${teacherName} 선생님 기준으로 현재 이동 가능한 시간이 없습니다.`;
-    }
-
-    const candidateLines = availableTargets.map((slot, idx) =>
-      `${idx + 1}. [${slot.weekName}] ${slot.className} ${DAYS[slot.d]}요일 ${PERIODS[slot.p]}교시`
-    );
-
-    return `전담 수업 이동 안내\n\n${fromLine}\n${targetLine}\n\n${reasonLine}\n\n${teacherName} 선생님 기준 이동 가능 시간:\n${candidateLines.join('\n')}`;
+    return `전담 수업 이동 제약 안내\n\n${fromLine}\n${targetLine}\n\n${reasonLine}\n\n그래도 이동하시겠습니까?\n확인 시 강제 이동되어 빨간 테두리로 표시됩니다.`;
   };
 
-  const getConflictBorderClassName = (hasTemplateMismatch, hasTeacherConflict) => {
-    if (hasTeacherConflict) return 'border-red-500 border-2 ';
+  const getConflictBorderClassName = (hasTemplateMismatch, hasTeacherConflict, hasForcedConflict = false) => {
+    if (hasTeacherConflict || hasForcedConflict) return 'border-red-500 border-2 ';
     if (hasTemplateMismatch) return 'border-blue-500 border-2 ';
     return '';
   };
@@ -1506,11 +1404,15 @@ export default function TimetableApp() {
         p,
         d
       };
+      let isForcedSpecialSwap = false;
       if (isSpecialLikeCell(sourceCellCurrent)) {
         const evaluation = evaluateSpecialSwapTarget(sourceMeta, sourceCellCurrent, targetMeta, clickedCell);
         if (!evaluation.canSwap) {
-          window.alert(buildSpecialMoveGuideMessage(sourceMeta, sourceCellCurrent, targetMeta, evaluation));
-          return;
+          const shouldForceMove = window.confirm(
+            buildSpecialForcedSwapConfirmMessage(sourceMeta, sourceCellCurrent, targetMeta, evaluation)
+          );
+          if (!shouldForceMove) return;
+          isForcedSpecialSwap = true;
         }
       }
 
@@ -1539,14 +1441,26 @@ export default function TimetableApp() {
         newAllSchedules[wName][cName][p] = [...newAllSchedules[wName][cName][p]];
       }
 
-      const temp = newAllSchedules[wName][cName][p][d];
-      newAllSchedules[wName][cName][p][d] = newAllSchedules[w1][c1][p1][d1];
-      newAllSchedules[w1][c1][p1][d1] = temp;
+      const targetOriginalCell = newAllSchedules[wName][cName][p][d];
+      const sourceOriginalCell = newAllSchedules[w1][c1][p1][d1];
+      const movedToTargetCell = { ...sourceOriginalCell, forcedConflict: false };
+      const movedToSourceCell = { ...targetOriginalCell, forcedConflict: false };
+
+      if (isForcedSpecialSwap) {
+        if (isSpecialLikeCell(movedToTargetCell)) movedToTargetCell.forcedConflict = true;
+        if (isSpecialLikeCell(movedToSourceCell)) movedToSourceCell.forcedConflict = true;
+      }
+
+      newAllSchedules[wName][cName][p][d] = movedToTargetCell;
+      newAllSchedules[w1][c1][p1][d1] = movedToSourceCell;
 
       setAllSchedules(newAllSchedules);
       setSelectedCell(null);
 
       const warnings = [validation.reason];
+      if (isForcedSpecialSwap) {
+        warnings.push('[경고] 교사 조건을 무시하고 강제 이동했습니다. 빨간 테두리로 표시됩니다.');
+      }
       const movedCellWarning = buildTeacherOverlapWarning(wName, cName, p, d, newAllSchedules[wName][cName][p][d], newAllSchedules);
       const sourceCellWarning = buildTeacherOverlapWarning(w1, c1, p1, d1, newAllSchedules[w1][c1][p1][d1], newAllSchedules);
       const movedCellMismatchNotice = buildTemplateMismatchNotice(wName, cName, p, d, newAllSchedules[wName][cName][p][d]);
@@ -1584,7 +1498,7 @@ export default function TimetableApp() {
     newAllSchedules[weekName][className][p] = [...newAllSchedules[weekName][className][p]];
 
     if (!newSubject) {
-      newAllSchedules[weekName][className][p][d] = { subject: '', type: 'empty', id: `${className}-${p}-${d}` };
+      newAllSchedules[weekName][className][p][d] = { subject: '', type: 'empty', forcedConflict: false, id: `${className}-${p}-${d}` };
       setAllSchedules(newAllSchedules);
       if (selectedCell && selectedCell.weekName === weekName && selectedCell.className === className && selectedCell.p === p && selectedCell.d === d) {
         setSelectedCell({ weekName, className, p, d, ...newAllSchedules[weekName][className][p][d] });
@@ -1618,6 +1532,7 @@ export default function TimetableApp() {
       type: newType,
       teacherId: newTeacherId,
       teacher: newTeacherName,
+      forcedConflict: false,
       location: finalLocation,
       id: `${className}-${p}-${d}`
     };
@@ -1707,6 +1622,7 @@ export default function TimetableApp() {
       type: 'special',
       teacherId: expected.teacherId,
       teacher: expected.teacher,
+      forcedConflict: false,
       location: (expected.location || '').trim() || getDefaultLocation(expected.subject, dayIndex, periodIndex),
       id: `${className}-${periodIndex}-${dayIndex}-special`
     };
@@ -1760,6 +1676,7 @@ export default function TimetableApp() {
             type: 'holiday',
             teacherId: null,
             teacher: '',
+            forcedConflict: false,
             location: '',
             id: `${className}-${periodIndex}-${dayIndex}-holiday`
           };
@@ -1822,12 +1739,13 @@ export default function TimetableApp() {
   const getCellStyles = (p, d, cell) => {
     const isSelected = selectedCell?.weekName === currentWeekName && selectedCell?.className === currentClass && selectedCell?.p === p && selectedCell?.d === d;
     const hasTeacherConflict = hasTeacherOverlapConflict(currentWeekName, currentClass, p, d, cell);
+    const hasForcedConflict = Boolean(cell?.forcedConflict);
     const hasTemplateMismatch = isCellMismatchedWithTemplate(currentClass, p, d, cell);
     const swapTargetState = getSwapTargetState(currentWeekName, currentClass, p, d, cell);
     let baseStyle = "relative transition-all duration-200 ease-in-out border border-gray-300 p-2 h-24 flex flex-col items-center justify-center cursor-pointer font-medium text-lg rounded-sm ";
     
     baseStyle += getTimetableCellColor(cell) + " ";
-    baseStyle += getConflictBorderClassName(hasTemplateMismatch, hasTeacherConflict);
+    baseStyle += getConflictBorderClassName(hasTemplateMismatch, hasTeacherConflict, hasForcedConflict);
 
     if (isSelected) baseStyle += "ring-4 ring-yellow-400 transform scale-105 z-10 shadow-lg ";
 
@@ -1836,21 +1754,13 @@ export default function TimetableApp() {
       if (swapTargetState.active) {
         if (swapTargetState.canSwap && swapTargetState.highlightReason === 'special_teacher_available') {
           baseStyle += "ring-2 ring-inset ring-emerald-500 bg-emerald-50 ";
-          overlay = (
-            <div className="absolute inset-0 bg-emerald-500/10 flex items-center justify-center z-20">
-              <span className="text-[11px] font-bold text-emerald-900 tracking-wide">이동가능</span>
-            </div>
-          );
+          overlay = <div className="absolute inset-0 bg-emerald-500/10 z-20" />;
         } else if (!swapTargetState.canSwap && swapTargetState.blockReason === 'holiday') {
           baseStyle += "opacity-60 cursor-not-allowed ";
           overlay = <div className="absolute inset-0 bg-red-500 bg-opacity-20 flex items-center justify-center z-20"><X className="text-red-600 w-8 h-8 opacity-70" /></div>;
         } else if (!swapTargetState.canSwap) {
           baseStyle += "opacity-60 cursor-not-allowed ";
-          overlay = (
-            <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20">
-              <span className="text-[10px] font-bold text-white tracking-wide">{getSpecialSwapBlockLabel(swapTargetState.blockReason)}</span>
-            </div>
-          );
+          overlay = <div className="absolute inset-0 bg-black bg-opacity-70 z-20" />;
         } else {
           baseStyle += "hover:ring-2 hover:ring-blue-400 hover:scale-105 z-10 ";
         }
@@ -1895,11 +1805,12 @@ export default function TimetableApp() {
   const getCompactCellStyles = (className, p, d, cell) => {
     const isSelected = selectedCell?.weekName === currentWeekName && selectedCell?.className === className && selectedCell?.p === p && selectedCell?.d === d;
     const hasTeacherConflict = hasTeacherOverlapConflict(currentWeekName, className, p, d, cell);
+    const hasForcedConflict = Boolean(cell?.forcedConflict);
     const hasTemplateMismatch = isCellMismatchedWithTemplate(className, p, d, cell);
     const swapTargetState = getSwapTargetState(currentWeekName, className, p, d, cell);
     let baseStyle = 'relative transition-all duration-150 ease-in-out border border-gray-300 p-1 h-[60px] flex flex-col items-center justify-center cursor-pointer rounded ';
     baseStyle += getTimetableCellColor(cell) + ' ';
-    baseStyle += getConflictBorderClassName(hasTemplateMismatch, hasTeacherConflict);
+    baseStyle += getConflictBorderClassName(hasTemplateMismatch, hasTeacherConflict, hasForcedConflict);
 
     if (isSelected) baseStyle += 'ring-2 ring-yellow-400 scale-[1.03] z-20 shadow ';
 
@@ -1908,13 +1819,13 @@ export default function TimetableApp() {
       if (swapTargetState.active) {
         if (swapTargetState.canSwap && swapTargetState.highlightReason === 'special_teacher_available') {
           baseStyle += 'ring-2 ring-inset ring-emerald-500 bg-emerald-50 ';
-          overlay = <div className="absolute inset-0 bg-emerald-500/10 flex items-center justify-center z-20"><span className="text-[8px] font-bold text-emerald-900">가능</span></div>;
+          overlay = <div className="absolute inset-0 bg-emerald-500/10 z-20" />;
         } else if (!swapTargetState.canSwap && swapTargetState.blockReason === 'holiday') {
           baseStyle += 'opacity-60 cursor-not-allowed ';
           overlay = <div className="absolute inset-0 bg-red-500/20 flex items-center justify-center z-20"><X className="text-red-600 w-4 h-4 opacity-70" /></div>;
         } else if (!swapTargetState.canSwap) {
           baseStyle += 'opacity-60 cursor-not-allowed ';
-          overlay = <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20"><span className="text-[8px] font-bold text-white">{getSpecialSwapBlockLabel(swapTargetState.blockReason)}</span></div>;
+          overlay = <div className="absolute inset-0 bg-black bg-opacity-70 z-20" />;
         } else {
           baseStyle += 'hover:ring-2 hover:ring-blue-300 hover:scale-[1.02] ';
         }
@@ -2032,11 +1943,12 @@ export default function TimetableApp() {
   const getMonthlyClassCellStyles = (weekName, className, p, d, cell, dense = false) => {
     const isSelected = selectedCell?.weekName === weekName && selectedCell?.className === className && selectedCell?.p === p && selectedCell?.d === d;
     const hasTeacherConflict = hasTeacherOverlapConflict(weekName, className, p, d, cell);
+    const hasForcedConflict = Boolean(cell?.forcedConflict);
     const hasTemplateMismatch = isCellMismatchedWithTemplate(className, p, d, cell);
     const swapTargetState = getSwapTargetState(weekName, className, p, d, cell);
     let baseStyle = `relative transition-all duration-150 ease-in-out border border-gray-300 ${dense ? 'p-0.5 h-[52px] rounded-sm' : 'p-1 h-[78px] rounded'} flex flex-col items-center justify-center cursor-pointer `;
     baseStyle += getTimetableCellColor(cell) + ' ';
-    baseStyle += getConflictBorderClassName(hasTemplateMismatch, hasTeacherConflict);
+    baseStyle += getConflictBorderClassName(hasTemplateMismatch, hasTeacherConflict, hasForcedConflict);
     if (isSelected) baseStyle += dense ? 'ring-1 ring-yellow-400 z-20 shadow ' : 'ring-2 ring-yellow-400 scale-[1.02] z-20 shadow ';
 
     let overlay = null;
@@ -2044,21 +1956,13 @@ export default function TimetableApp() {
       if (swapTargetState.active) {
         if (swapTargetState.canSwap && swapTargetState.highlightReason === 'special_teacher_available') {
           baseStyle += dense ? 'ring-1 ring-inset ring-emerald-500 bg-emerald-50 ' : 'ring-2 ring-inset ring-emerald-500 bg-emerald-50 ';
-          overlay = (
-            <div className="absolute inset-0 bg-emerald-500/10 flex items-center justify-center z-20">
-              <span className={`${dense ? 'text-[7px]' : 'text-[10px]'} font-bold text-emerald-900`}>가능</span>
-            </div>
-          );
+          overlay = <div className="absolute inset-0 bg-emerald-500/10 z-20" />;
         } else if (!swapTargetState.canSwap && swapTargetState.blockReason === 'holiday') {
           baseStyle += 'opacity-60 cursor-not-allowed ';
           overlay = <div className="absolute inset-0 bg-red-500/20 flex items-center justify-center z-20"><X className={`text-red-600 ${dense ? 'w-3 h-3' : 'w-4 h-4'} opacity-70`} /></div>;
         } else if (!swapTargetState.canSwap) {
           baseStyle += 'opacity-60 cursor-not-allowed ';
-          overlay = (
-            <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20">
-              <span className={`${dense ? 'text-[7px]' : 'text-[10px]'} font-bold text-white`}>{getSpecialSwapBlockLabel(swapTargetState.blockReason)}</span>
-            </div>
-          );
+          overlay = <div className="absolute inset-0 bg-black bg-opacity-70 z-20" />;
         } else {
           baseStyle += dense ? 'hover:ring-1 hover:ring-blue-300 ' : 'hover:ring-2 hover:ring-blue-300 hover:scale-[1.01] ';
         }
@@ -2294,15 +2198,16 @@ export default function TimetableApp() {
               const liveCell = allSchedules?.[selectedCell.weekName]?.[selectedCell.className]?.[selectedCell.p]?.[selectedCell.d] || selectedCell;
               const hasMismatch = isCellMismatchedWithTemplate(selectedCell.className, selectedCell.p, selectedCell.d, liveCell);
               const hasOverlap = hasTeacherOverlapConflict(selectedCell.weekName, selectedCell.className, selectedCell.p, selectedCell.d, liveCell);
-              if (!hasMismatch && !hasOverlap) return null;
+              const hasForcedConflict = Boolean(liveCell?.forcedConflict);
+              if (!hasMismatch && !hasOverlap && !hasForcedConflict) return null;
 
               return (
                 <div className="flex flex-wrap items-center gap-2 text-xs">
                   {hasMismatch && (
                     <span className="px-2 py-1 rounded bg-blue-50 text-blue-700 border border-blue-200 font-semibold">파란 테두리 원인: 전담 템플릿 불일치</span>
                   )}
-                  {hasOverlap && (
-                    <span className="px-2 py-1 rounded bg-rose-50 text-rose-700 border border-rose-200 font-semibold">빨간 테두리 원인: 전담 중복 배치</span>
+                  {(hasOverlap || hasForcedConflict) && (
+                    <span className="px-2 py-1 rounded bg-rose-50 text-rose-700 border border-rose-200 font-semibold">빨간 테두리 원인: 전담 중복 배치 또는 강제 이동</span>
                   )}
                 </div>
               );
@@ -2310,10 +2215,10 @@ export default function TimetableApp() {
 
             {isSpecialSelectionForSwapHint && (
               <div className="flex flex-wrap items-center gap-2 text-xs">
-                <span className="px-2 py-1 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold">초록 표시: 선택 전담 교사 기준 이동 가능 시간</span>
-                <span className="px-2 py-1 rounded bg-gray-900 text-white border border-gray-800 font-semibold">검정 오버레이: 교사 조건 불충족(수업 중/담당학급 아님)</span>
+                <span className="px-2 py-1 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold">초록 음영: 선택 전담 교사 기준 이동 가능 시간</span>
+                <span className="px-2 py-1 rounded bg-gray-900 text-white border border-gray-800 font-semibold">검정 음영: 교사 조건 불충족 (클릭 시 강제 이동 확인)</span>
                 <span className="px-2 py-1 rounded bg-red-50 text-red-700 border border-red-200 font-semibold">X 오버레이: 휴업일(이동 불가)</span>
-                <span className="px-2 py-1 rounded bg-indigo-50 text-indigo-700 border border-indigo-200 font-semibold">이동 불가 칸 클릭 시 가능한 시간 안내 팝업 표시</span>
+                <span className="px-2 py-1 rounded bg-indigo-50 text-indigo-700 border border-indigo-200 font-semibold">강제 이동 시 빨간 테두리로 표시</span>
               </div>
             )}
 
@@ -2588,12 +2493,13 @@ export default function TimetableApp() {
                               const isDimmed = hasTeacherHighlightFilter && !isHighlighted;
                               const isTemplateMismatch = isCellMismatchedWithTemplate(cls, pIdx, dIdx, cell);
                               const isTeacherConflict = hasTeacherOverlapConflict(weekName, cls, pIdx, dIdx, cell);
+                              const hasForcedConflict = Boolean(cell?.forcedConflict);
                               const isSelected = selectedCell?.weekName === weekName && selectedCell?.className === cls && selectedCell?.p === pIdx && selectedCell?.d === dIdx;
                               const swapTargetState = getSwapTargetState(weekName, cls, pIdx, dIdx, cell);
                               
                               let cellClass = `border border-gray-200 p-1 text-center h-14 relative cursor-pointer transition-all ${isDimmed ? 'opacity-20 grayscale ' : ''} ${isHighlighted ? 'ring-2 ring-inset ring-red-500 font-bold transform scale-105 z-10 shadow-md ' : ''}`;
                               cellClass += getTimetableCellColor(cell) + " ";
-                              cellClass += getConflictBorderClassName(isTemplateMismatch, isTeacherConflict);
+                              cellClass += getConflictBorderClassName(isTemplateMismatch, isTeacherConflict, hasForcedConflict);
 
                               if (isSelected) cellClass += "ring-4 ring-yellow-400 transform scale-105 z-20 shadow-lg ";
 
@@ -2602,13 +2508,13 @@ export default function TimetableApp() {
                                 if (swapTargetState.active) {
                                   if (swapTargetState.canSwap && swapTargetState.highlightReason === 'special_teacher_available') {
                                     cellClass += "ring-2 ring-inset ring-emerald-500 bg-emerald-50 ";
-                                    overlay = <div className="absolute inset-0 bg-emerald-500/10 flex items-center justify-center z-20"><span className="text-[9px] font-bold text-emerald-900">가능</span></div>;
+                                    overlay = <div className="absolute inset-0 bg-emerald-500/10 z-20" />;
                                   } else if (!swapTargetState.canSwap && swapTargetState.blockReason === 'holiday') {
                                     cellClass += "opacity-60 cursor-not-allowed ";
                                     overlay = <div className="absolute inset-0 bg-red-500 bg-opacity-20 flex items-center justify-center z-20"><X className="text-red-600 w-5 h-5 opacity-70" /></div>;
                                   } else if (!swapTargetState.canSwap) {
                                     cellClass += "opacity-60 cursor-not-allowed ";
-                                    overlay = <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20"><span className="text-[9px] font-bold text-white">{getSpecialSwapBlockLabel(swapTargetState.blockReason)}</span></div>;
+                                    overlay = <div className="absolute inset-0 bg-black bg-opacity-70 z-20" />;
                                   } else {
                                     cellClass += "hover:ring-2 hover:ring-blue-400 hover:scale-105 z-10 ";
                                   }
