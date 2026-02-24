@@ -435,6 +435,7 @@ export default function TimetableApp() {
   const [isSpacePanMode, setIsSpacePanMode] = useState(false);
   const [cellSubjectContextMenu, setCellSubjectContextMenu] = useState(null);
   const [contextMenuSubjectValue, setContextMenuSubjectValue] = useState('');
+  const [contextMenuInitialSubjectValue, setContextMenuInitialSubjectValue] = useState('');
   const [currentWeekIndex, setCurrentWeekIndex] = useState(0);
   const [currentClass, setCurrentClass] = useState('1반');
   const [selectedCell, setSelectedCell] = useState(null);
@@ -621,7 +622,7 @@ export default function TimetableApp() {
 
     const handleMouseDown = (e) => {
       if (contextMenuRef.current && !contextMenuRef.current.contains(e.target)) {
-        closeCellSubjectContextMenu();
+        applyContextMenuSubjectChange();
       }
     };
 
@@ -629,7 +630,7 @@ export default function TimetableApp() {
       if (e.key === 'Escape') closeCellSubjectContextMenu();
     };
 
-    const handleScroll = () => closeCellSubjectContextMenu();
+    const handleScroll = () => applyContextMenuSubjectChange();
 
     window.addEventListener('mousedown', handleMouseDown);
     window.addEventListener('keydown', handleKeyDown);
@@ -640,7 +641,7 @@ export default function TimetableApp() {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('scroll', handleScroll, true);
     };
-  }, [cellSubjectContextMenu]);
+  }, [cellSubjectContextMenu, contextMenuSubjectValue, contextMenuInitialSubjectValue]);
 
   const showNotification = (message, type = 'error') => setToast({ show: true, message, type });
   const teacherAssignableSubjects = ALL_SUBJECTS.filter(subject => subject !== '휴업일');
@@ -1074,12 +1075,15 @@ export default function TimetableApp() {
       x: e.clientX,
       y: e.clientY
     });
-    setContextMenuSubjectValue(getSubjectSelectionValueForCell(cell));
+    const selectionValue = getSubjectSelectionValueForCell(cell);
+    setContextMenuSubjectValue(selectionValue);
+    setContextMenuInitialSubjectValue(selectionValue);
   };
 
   const closeCellSubjectContextMenu = () => {
     setCellSubjectContextMenu(null);
     setContextMenuSubjectValue('');
+    setContextMenuInitialSubjectValue('');
   };
 
   // 충돌 검사 (선생님 기준)
@@ -1257,8 +1261,11 @@ export default function TimetableApp() {
 
   const applyContextMenuSubjectChange = () => {
     if (!cellSubjectContextMenu) return;
+    const hasChange = contextMenuSubjectValue !== contextMenuInitialSubjectValue;
     const { weekName, className, p, d } = cellSubjectContextMenu;
-    applySubjectChangeToCell(weekName, className, p, d, contextMenuSubjectValue);
+    if (hasChange) {
+      applySubjectChangeToCell(weekName, className, p, d, contextMenuSubjectValue);
+    }
     closeCellSubjectContextMenu();
   };
 
@@ -1857,6 +1864,24 @@ export default function TimetableApp() {
               <Edit2 className="text-yellow-500" size={20} />
               <span>[{selectedCell.weekName}] {selectedCell.className} - {DAYS[selectedCell.d]}요일 {PERIODS[selectedCell.p]}교시</span>
             </div>
+
+            {(() => {
+              const liveCell = allSchedules?.[selectedCell.weekName]?.[selectedCell.className]?.[selectedCell.p]?.[selectedCell.d] || selectedCell;
+              const hasMismatch = isCellMismatchedWithTemplate(selectedCell.className, selectedCell.p, selectedCell.d, liveCell);
+              const hasOverlap = hasTeacherOverlapConflict(selectedCell.weekName, selectedCell.className, selectedCell.p, selectedCell.d, liveCell);
+              if (!hasMismatch && !hasOverlap) return null;
+
+              return (
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  {hasMismatch && (
+                    <span className="px-2 py-1 rounded bg-rose-50 text-rose-700 border border-rose-200 font-semibold">빨간 테두리 원인: 템플릿 불일치</span>
+                  )}
+                  {hasOverlap && (
+                    <span className="px-2 py-1 rounded bg-amber-50 text-amber-700 border border-amber-200 font-semibold">빨간 테두리 원인: 전담 중복 배치</span>
+                  )}
+                </div>
+              );
+            })()}
 
             <div className="flex flex-wrap items-center gap-3">
               <span className="text-sm font-semibold text-gray-500">과목 변경:</span>
