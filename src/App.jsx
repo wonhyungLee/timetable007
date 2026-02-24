@@ -12,6 +12,33 @@ const ALL_SUBJECTS = [
   '자율자치', '동아리', '봉사', '진로', '학교자율', '창체', '휴업일'
 ];
 
+const HOMEROOM_FLEX_SUBJECTS = ['과학', '체육', '음악'];
+const HOMEROOM_OVERRIDE_PREFIX = '__homeroom__::';
+
+const toHomeroomOverrideValue = (subject) => `${HOMEROOM_OVERRIDE_PREFIX}${subject}`;
+
+const parseSubjectSelection = (value) => {
+  if (!value) return { subject: '', forceHomeroom: false };
+  if (typeof value === 'string' && value.startsWith(HOMEROOM_OVERRIDE_PREFIX)) {
+    return {
+      subject: value.slice(HOMEROOM_OVERRIDE_PREFIX.length),
+      forceHomeroom: true
+    };
+  }
+  return { subject: value, forceHomeroom: false };
+};
+
+const SUBJECT_SELECT_OPTIONS = ALL_SUBJECTS.flatMap((subject) => {
+  if (!HOMEROOM_FLEX_SUBJECTS.includes(subject)) {
+    return [{ value: subject, label: subject }];
+  }
+
+  return [
+    { value: subject, label: `${subject} (전담)` },
+    { value: toHomeroomOverrideValue(subject), label: `${subject} (담임)` }
+  ];
+});
+
 const WEEK_START_DATES = {};
 
 const generate2026Weeks = () => {
@@ -311,6 +338,13 @@ export default function TimetableApp() {
   const isWeeklyAllView = viewMode === 'weekly' && weeklyLayoutMode === 'all';
   const isMonthlyClassWeeklyView = viewMode === 'monthly' && monthlyLayoutMode === 'class_weekly';
   const isWideContentMode = isWeeklyAllView || isMonthlyClassWeeklyView;
+  const selectedSubjectOptionValue = selectedCell
+    ? (
+      selectedCell.type === 'homeroom' && HOMEROOM_FLEX_SUBJECTS.includes(selectedCell.subject)
+        ? toHomeroomOverrideValue(selectedCell.subject)
+        : (selectedCell.subject || '')
+    )
+    : '';
   const hasTeacherHighlightFilter = highlightTeacherIds.length > 0;
   const templateExpectationMap = useMemo(() => {
     const map = {};
@@ -854,8 +888,9 @@ export default function TimetableApp() {
   };
 
   // 📝 리스트에서 과목 바로 변경 또는 삭제(빈칸) 처리
-  const handleDirectSubjectChange = (newSubject) => {
+  const handleDirectSubjectChange = (newSubjectSelection) => {
     if (!selectedCell) return;
+    const { subject: newSubject, forceHomeroom } = parseSubjectSelection(newSubjectSelection);
     const { weekName, className, p, d } = selectedCell;
     const newAllSchedules = { ...allSchedules };
 
@@ -869,7 +904,6 @@ export default function TimetableApp() {
       showNotification('수업이 삭제되었습니다. (빈칸)', 'success');
     } else {
       // 과목 변경
-      let isSpecial = false;
       let newType = 'homeroom';
       let newTeacherId = null;
       let newTeacherName = '';
@@ -877,12 +911,11 @@ export default function TimetableApp() {
 
       if (newSubject === '휴업일') {
         newType = 'holiday';
-      } else {
+      } else if (!forceHomeroom) {
         const classNum = parseInt(className.replace('반', ''));
         const teacherObj = teacherConfigs.find(t => t.subject === newSubject && t.classes.includes(classNum));
 
         if (teacherObj) {
-          isSpecial = true;
           newType = 'special';
           newTeacherId = teacherObj.id;
           newTeacherName = teacherObj.name;
@@ -910,7 +943,10 @@ export default function TimetableApp() {
         location: finalLocation,
         id: `${className}-${p}-${d}`
       };
-      showNotification(`${newSubject} 과목으로 변경되었습니다.`, 'success');
+      showNotification(
+        `${newSubject}${forceHomeroom ? ' (담임)' : ''} 과목으로 변경되었습니다.`,
+        'success'
+      );
     }
 
     setAllSchedules(newAllSchedules);
@@ -1458,13 +1494,16 @@ export default function TimetableApp() {
             <div className="flex flex-wrap items-center gap-3">
               <span className="text-sm font-semibold text-gray-500">과목 변경:</span>
               <select 
-                value={selectedCell.subject || ''} 
+                value={selectedSubjectOptionValue} 
                 onChange={(e) => handleDirectSubjectChange(e.target.value)}
                 className="border border-gray-300 p-2 rounded-md shadow-inner focus:outline-none focus:ring-2 focus:ring-yellow-500 bg-gray-50 font-bold text-gray-700"
               >
                 <option value="" disabled>-- 과목 선택 --</option>
-                {ALL_SUBJECTS.map(s => <option key={s} value={s}>{s}</option>)}
+                {SUBJECT_SELECT_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
               </select>
+              <span className="text-xs text-gray-400">과학/체육/음악은 전담/담임 선택 가능</span>
 
               <button 
                 onClick={() => handleDirectSubjectChange('')} 
