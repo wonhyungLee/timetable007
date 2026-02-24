@@ -138,6 +138,12 @@ const isOccupiedLessonCell = (cell) => {
   if (cell.type === 'empty') return false;
   return Boolean((cell.subject || '').trim());
 };
+const isSpecialLikeCell = (cell) => {
+  if (!cell || isHolidayCell(cell)) return false;
+  if (cell.type === 'special') return true;
+  if (cell.teacherId) return true;
+  return Boolean((cell.teacher || '').trim());
+};
 
 const getTimetableCellColor = (cell) => {
   const subject = cell?.subject || '';
@@ -505,7 +511,7 @@ export default function TimetableApp() {
   const liveSelectedCell = selectedCell
     ? allSchedules?.[selectedCell.weekName]?.[selectedCell.className]?.[selectedCell.p]?.[selectedCell.d]
     : null;
-  const isSpecialSelectionForSwapHint = (liveSelectedCell?.type || selectedCell?.type) === 'special';
+  const isSpecialSelectionForSwapHint = isSpecialLikeCell(liveSelectedCell || selectedCell);
   const selectedSubjectOptionValue = selectedCell ? getSubjectSelectionValueForCell(selectedCell) : '';
   const hasTeacherHighlightFilter = highlightTeacherIds.length > 0;
   const templateExpectationMap = useMemo(() => {
@@ -1104,7 +1110,7 @@ export default function TimetableApp() {
       allSchedules?.[selectedCell.weekName]?.[selectedCell.className]?.[selectedCell.p]?.[selectedCell.d];
     const sourceCell = sourceLiveCell || selectedCell;
 
-    const isSpecialSwapMode = sourceCell?.type === 'special';
+    const isSpecialSwapMode = isSpecialLikeCell(sourceCell);
     if (!isSpecialSwapMode) {
       return {
         active: false,
@@ -1214,7 +1220,7 @@ export default function TimetableApp() {
         setSelectedCell(null);
         return;
       }
-      if (swapTargetState.active && !swapTargetState.canSwap && swapTargetState.blockReason === 'occupied') {
+      if (isSpecialLikeCell(sourceCellCurrent) && swapTargetState.active && !swapTargetState.canSwap && swapTargetState.blockReason === 'occupied') {
         showNotification('전담 이동은 빈칸으로만 가능합니다. 이미 수업이 있는 칸은 검정 표시 영역입니다.', 'error');
         return;
       }
