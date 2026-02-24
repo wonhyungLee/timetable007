@@ -496,6 +496,10 @@ export default function TimetableApp() {
   const isMonthlyClassWeeklyView = viewMode === 'monthly' && monthlyLayoutMode === 'class_weekly';
   const isWideContentMode = isWeeklyAllView || isMonthlyClassWeeklyView;
   const isSelectedHolidayCell = isHolidayCell(selectedCell);
+  const liveSelectedCell = selectedCell
+    ? allSchedules?.[selectedCell.weekName]?.[selectedCell.className]?.[selectedCell.p]?.[selectedCell.d]
+    : null;
+  const isSpecialSelectionForSwapHint = liveSelectedCell?.type === 'special';
   const selectedSubjectOptionValue = selectedCell ? getSubjectSelectionValueForCell(selectedCell) : '';
   const hasTeacherHighlightFilter = highlightTeacherIds.length > 0;
   const templateExpectationMap = useMemo(() => {
@@ -1065,6 +1069,50 @@ export default function TimetableApp() {
     return '';
   };
 
+  const getSwapTargetState = (weekName, className, periodIndex, dayIndex, targetCell) => {
+    if (!selectedCell) {
+      return {
+        active: false,
+        isSelectedTarget: false,
+        canSwap: true
+      };
+    }
+
+    const isSelectedTarget =
+      selectedCell.weekName === weekName &&
+      selectedCell.className === className &&
+      selectedCell.p === periodIndex &&
+      selectedCell.d === dayIndex;
+
+    if (isSelectedTarget) {
+      return {
+        active: false,
+        isSelectedTarget: true,
+        canSwap: true
+      };
+    }
+
+    const sourceLiveCell =
+      allSchedules?.[selectedCell.weekName]?.[selectedCell.className]?.[selectedCell.p]?.[selectedCell.d];
+
+    const isSpecialSwapMode = sourceLiveCell?.type === 'special';
+    if (!isSpecialSwapMode) {
+      return {
+        active: false,
+        isSelectedTarget: false,
+        canSwap: true
+      };
+    }
+
+    const blockedByHoliday = isHolidayCell(sourceLiveCell) || isHolidayCell(targetCell);
+
+    return {
+      active: true,
+      isSelectedTarget: false,
+      canSwap: !blockedByHoliday
+    };
+  };
+
   const openCellSubjectContextMenu = (e, weekName, className, p, d) => {
     if (isSpacePanMode) return;
     e.preventDefault();
@@ -1453,6 +1501,7 @@ export default function TimetableApp() {
     const isSelected = selectedCell?.weekName === currentWeekName && selectedCell?.className === currentClass && selectedCell?.p === p && selectedCell?.d === d;
     const hasTeacherConflict = hasTeacherOverlapConflict(currentWeekName, currentClass, p, d, cell);
     const hasTemplateMismatch = isCellMismatchedWithTemplate(currentClass, p, d, cell);
+    const swapTargetState = getSwapTargetState(currentWeekName, currentClass, p, d, cell);
     let baseStyle = "relative transition-all duration-200 ease-in-out border border-gray-300 p-2 h-24 flex flex-col items-center justify-center cursor-pointer font-medium text-lg rounded-sm ";
     
     baseStyle += getTimetableCellColor(cell) + " ";
@@ -1462,12 +1511,15 @@ export default function TimetableApp() {
 
     let overlay = null;
     if (selectedCell && !isSelected) {
-      const validation = isSwapValid(selectedCell, currentWeekName, currentClass, p, d);
-      if (!validation.valid) {
+      if (swapTargetState.active && !swapTargetState.canSwap) {
         baseStyle += "opacity-50 cursor-not-allowed ";
         overlay = <div className="absolute inset-0 bg-red-500 bg-opacity-20 flex items-center justify-center z-20"><X className="text-red-600 w-8 h-8 opacity-70" /></div>;
       } else {
-        baseStyle += "hover:ring-2 hover:ring-blue-400 hover:scale-105 z-10 ";
+        if (swapTargetState.active && swapTargetState.canSwap) {
+          baseStyle += "ring-2 ring-inset ring-sky-300 bg-sky-50/40 hover:ring-sky-500 ";
+        } else {
+          baseStyle += "hover:ring-2 hover:ring-blue-400 hover:scale-105 z-10 ";
+        }
       }
     }
     return { style: baseStyle, overlay };
@@ -1510,6 +1562,7 @@ export default function TimetableApp() {
     const isSelected = selectedCell?.weekName === currentWeekName && selectedCell?.className === className && selectedCell?.p === p && selectedCell?.d === d;
     const hasTeacherConflict = hasTeacherOverlapConflict(currentWeekName, className, p, d, cell);
     const hasTemplateMismatch = isCellMismatchedWithTemplate(className, p, d, cell);
+    const swapTargetState = getSwapTargetState(currentWeekName, className, p, d, cell);
     let baseStyle = 'relative transition-all duration-150 ease-in-out border border-gray-300 p-1 h-[60px] flex flex-col items-center justify-center cursor-pointer rounded ';
     baseStyle += getTimetableCellColor(cell) + ' ';
     baseStyle += getConflictBorderClassName(hasTemplateMismatch, hasTeacherConflict);
@@ -1518,12 +1571,15 @@ export default function TimetableApp() {
 
     let overlay = null;
     if (selectedCell && !isSelected) {
-      const validation = isSwapValid(selectedCell, currentWeekName, className, p, d);
-      if (!validation.valid) {
+      if (swapTargetState.active && !swapTargetState.canSwap) {
         baseStyle += 'opacity-50 cursor-not-allowed ';
         overlay = <div className="absolute inset-0 bg-red-500/20 flex items-center justify-center z-20"><X className="text-red-600 w-4 h-4 opacity-70" /></div>;
       } else {
-        baseStyle += 'hover:ring-2 hover:ring-blue-300 hover:scale-[1.02] ';
+        if (swapTargetState.active && swapTargetState.canSwap) {
+          baseStyle += 'ring-2 ring-inset ring-sky-300 bg-sky-50/40 hover:ring-sky-500 ';
+        } else {
+          baseStyle += 'hover:ring-2 hover:ring-blue-300 hover:scale-[1.02] ';
+        }
       }
     }
 
@@ -1639,6 +1695,7 @@ export default function TimetableApp() {
     const isSelected = selectedCell?.weekName === weekName && selectedCell?.className === className && selectedCell?.p === p && selectedCell?.d === d;
     const hasTeacherConflict = hasTeacherOverlapConflict(weekName, className, p, d, cell);
     const hasTemplateMismatch = isCellMismatchedWithTemplate(className, p, d, cell);
+    const swapTargetState = getSwapTargetState(weekName, className, p, d, cell);
     let baseStyle = `relative transition-all duration-150 ease-in-out border border-gray-300 ${dense ? 'p-0.5 h-[52px] rounded-sm' : 'p-1 h-[78px] rounded'} flex flex-col items-center justify-center cursor-pointer `;
     baseStyle += getTimetableCellColor(cell) + ' ';
     baseStyle += getConflictBorderClassName(hasTemplateMismatch, hasTeacherConflict);
@@ -1646,12 +1703,15 @@ export default function TimetableApp() {
 
     let overlay = null;
     if (selectedCell && !isSelected) {
-      const validation = isSwapValid(selectedCell, weekName, className, p, d);
-      if (!validation.valid) {
+      if (swapTargetState.active && !swapTargetState.canSwap) {
         baseStyle += 'opacity-50 cursor-not-allowed ';
         overlay = <div className="absolute inset-0 bg-red-500/20 flex items-center justify-center z-20"><X className={`text-red-600 ${dense ? 'w-3 h-3' : 'w-4 h-4'} opacity-70`} /></div>;
       } else {
-        baseStyle += dense ? 'hover:ring-1 hover:ring-blue-300 ' : 'hover:ring-2 hover:ring-blue-300 hover:scale-[1.01] ';
+        if (swapTargetState.active && swapTargetState.canSwap) {
+          baseStyle += dense ? 'ring-1 ring-inset ring-sky-300 bg-sky-50/40 hover:ring-sky-500 ' : 'ring-2 ring-inset ring-sky-300 bg-sky-50/40 hover:ring-sky-500 ';
+        } else {
+          baseStyle += dense ? 'hover:ring-1 hover:ring-blue-300 ' : 'hover:ring-2 hover:ring-blue-300 hover:scale-[1.01] ';
+        }
       }
     }
 
@@ -1897,6 +1957,13 @@ export default function TimetableApp() {
                 </div>
               );
             })()}
+
+            {isSpecialSelectionForSwapHint && (
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <span className="px-2 py-1 rounded bg-sky-50 text-sky-700 border border-sky-200 font-semibold">파란 하이라이트: 교환 가능한 영역</span>
+                <span className="px-2 py-1 rounded bg-red-50 text-red-700 border border-red-200 font-semibold">X 오버레이: 교환 불가 영역(휴업일 포함)</span>
+              </div>
+            )}
 
             <div className="flex flex-wrap items-center gap-3">
               <span className="text-sm font-semibold text-gray-500">과목 변경:</span>
@@ -2170,6 +2237,7 @@ export default function TimetableApp() {
                               const isTemplateMismatch = isCellMismatchedWithTemplate(cls, pIdx, dIdx, cell);
                               const isTeacherConflict = hasTeacherOverlapConflict(weekName, cls, pIdx, dIdx, cell);
                               const isSelected = selectedCell?.weekName === weekName && selectedCell?.className === cls && selectedCell?.p === pIdx && selectedCell?.d === dIdx;
+                              const swapTargetState = getSwapTargetState(weekName, cls, pIdx, dIdx, cell);
                               
                               let cellClass = `border border-gray-200 p-1 text-center h-14 relative cursor-pointer transition-all ${isDimmed ? 'opacity-20 grayscale ' : ''} ${isHighlighted ? 'ring-2 ring-inset ring-red-500 font-bold transform scale-105 z-10 shadow-md ' : ''}`;
                               cellClass += getTimetableCellColor(cell) + " ";
@@ -2179,12 +2247,15 @@ export default function TimetableApp() {
 
                               let overlay = null;
                               if (selectedCell && !isSelected) {
-                                const validation = isSwapValid(selectedCell, weekName, cls, pIdx, dIdx);
-                                if (!validation.valid) {
+                                if (swapTargetState.active && !swapTargetState.canSwap) {
                                   cellClass += "opacity-50 cursor-not-allowed ";
                                   overlay = <div className="absolute inset-0 bg-red-500 bg-opacity-20 flex items-center justify-center z-20"><X className="text-red-600 w-5 h-5 opacity-70" /></div>;
                                 } else {
-                                  cellClass += "hover:ring-2 hover:ring-blue-400 hover:scale-105 z-10 ";
+                                  if (swapTargetState.active && swapTargetState.canSwap) {
+                                    cellClass += "ring-2 ring-inset ring-sky-300 bg-sky-50/40 hover:ring-sky-500 ";
+                                  } else {
+                                    cellClass += "hover:ring-2 hover:ring-blue-400 hover:scale-105 z-10 ";
+                                  }
                                 }
                               }
                               
