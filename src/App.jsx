@@ -505,7 +505,7 @@ export default function TimetableApp() {
   const liveSelectedCell = selectedCell
     ? allSchedules?.[selectedCell.weekName]?.[selectedCell.className]?.[selectedCell.p]?.[selectedCell.d]
     : null;
-  const isSpecialSelectionForSwapHint = liveSelectedCell?.type === 'special';
+  const isSpecialSelectionForSwapHint = (liveSelectedCell?.type || selectedCell?.type) === 'special';
   const selectedSubjectOptionValue = selectedCell ? getSubjectSelectionValueForCell(selectedCell) : '';
   const hasTeacherHighlightFilter = highlightTeacherIds.length > 0;
   const templateExpectationMap = useMemo(() => {
@@ -1102,8 +1102,9 @@ export default function TimetableApp() {
 
     const sourceLiveCell =
       allSchedules?.[selectedCell.weekName]?.[selectedCell.className]?.[selectedCell.p]?.[selectedCell.d];
+    const sourceCell = sourceLiveCell || selectedCell;
 
-    const isSpecialSwapMode = sourceLiveCell?.type === 'special';
+    const isSpecialSwapMode = sourceCell?.type === 'special';
     if (!isSpecialSwapMode) {
       return {
         active: false,
@@ -1113,7 +1114,7 @@ export default function TimetableApp() {
       };
     }
 
-    const blockedByHoliday = isHolidayCell(sourceLiveCell) || isHolidayCell(targetCell);
+    const blockedByHoliday = isHolidayCell(sourceCell) || isHolidayCell(targetCell);
     const blockedByOccupied = !blockedByHoliday && isOccupiedLessonCell(targetCell);
 
     return {
@@ -1531,7 +1532,7 @@ export default function TimetableApp() {
         baseStyle += "opacity-60 cursor-not-allowed ";
         if (swapTargetState.blockReason === 'occupied') {
           overlay = (
-            <div className="absolute inset-0 bg-black/55 flex items-center justify-center z-20">
+            <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20">
               <span className="text-[11px] font-bold text-white tracking-wide">사용중</span>
             </div>
           );
@@ -1540,7 +1541,7 @@ export default function TimetableApp() {
         }
       } else {
         if (swapTargetState.active && swapTargetState.canSwap) {
-          baseStyle += "ring-2 ring-inset ring-sky-300 bg-sky-50/40 hover:ring-sky-500 ";
+          baseStyle += "ring-2 ring-inset ring-sky-400 bg-sky-100 hover:ring-sky-600 ";
         } else {
           baseStyle += "hover:ring-2 hover:ring-blue-400 hover:scale-105 z-10 ";
         }
@@ -1598,13 +1599,13 @@ export default function TimetableApp() {
       if (swapTargetState.active && !swapTargetState.canSwap) {
         baseStyle += 'opacity-60 cursor-not-allowed ';
         if (swapTargetState.blockReason === 'occupied') {
-          overlay = <div className="absolute inset-0 bg-black/55 flex items-center justify-center z-20"><span className="text-[8px] font-bold text-white">사용중</span></div>;
+          overlay = <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20"><span className="text-[8px] font-bold text-white">사용중</span></div>;
         } else {
           overlay = <div className="absolute inset-0 bg-red-500/20 flex items-center justify-center z-20"><X className="text-red-600 w-4 h-4 opacity-70" /></div>;
         }
       } else {
         if (swapTargetState.active && swapTargetState.canSwap) {
-          baseStyle += 'ring-2 ring-inset ring-sky-300 bg-sky-50/40 hover:ring-sky-500 ';
+          baseStyle += 'ring-2 ring-inset ring-sky-400 bg-sky-100 hover:ring-sky-600 ';
         } else {
           baseStyle += 'hover:ring-2 hover:ring-blue-300 hover:scale-[1.02] ';
         }
@@ -1735,7 +1736,7 @@ export default function TimetableApp() {
         baseStyle += 'opacity-60 cursor-not-allowed ';
         if (swapTargetState.blockReason === 'occupied') {
           overlay = (
-            <div className="absolute inset-0 bg-black/55 flex items-center justify-center z-20">
+            <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20">
               <span className={`${dense ? 'text-[7px]' : 'text-[10px]'} font-bold text-white`}>사용중</span>
             </div>
           );
@@ -1744,7 +1745,7 @@ export default function TimetableApp() {
         }
       } else {
         if (swapTargetState.active && swapTargetState.canSwap) {
-          baseStyle += dense ? 'ring-1 ring-inset ring-sky-300 bg-sky-50/40 hover:ring-sky-500 ' : 'ring-2 ring-inset ring-sky-300 bg-sky-50/40 hover:ring-sky-500 ';
+          baseStyle += dense ? 'ring-1 ring-inset ring-sky-400 bg-sky-100 hover:ring-sky-600 ' : 'ring-2 ring-inset ring-sky-400 bg-sky-100 hover:ring-sky-600 ';
         } else {
           baseStyle += dense ? 'hover:ring-1 hover:ring-blue-300 ' : 'hover:ring-2 hover:ring-blue-300 hover:scale-[1.01] ';
         }
@@ -2287,13 +2288,13 @@ export default function TimetableApp() {
                                 if (swapTargetState.active && !swapTargetState.canSwap) {
                                   cellClass += "opacity-60 cursor-not-allowed ";
                                   if (swapTargetState.blockReason === 'occupied') {
-                                    overlay = <div className="absolute inset-0 bg-black/55 flex items-center justify-center z-20"><span className="text-[9px] font-bold text-white">사용중</span></div>;
+                                    overlay = <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20"><span className="text-[9px] font-bold text-white">사용중</span></div>;
                                   } else {
                                     overlay = <div className="absolute inset-0 bg-red-500 bg-opacity-20 flex items-center justify-center z-20"><X className="text-red-600 w-5 h-5 opacity-70" /></div>;
                                   }
                                 } else {
                                   if (swapTargetState.active && swapTargetState.canSwap) {
-                                    cellClass += "ring-2 ring-inset ring-sky-300 bg-sky-50/40 hover:ring-sky-500 ";
+                                    cellClass += "ring-2 ring-inset ring-sky-400 bg-sky-100 hover:ring-sky-600 ";
                                   } else {
                                     cellClass += "hover:ring-2 hover:ring-blue-400 hover:scale-105 z-10 ";
                                   }
