@@ -394,6 +394,24 @@ const normalizeAllSchedulesForSync = (sourceAllSchedules, fallbackAllSchedules) 
   return next;
 };
 
+const normalizeWeeklyNoticesForSync = (sourceWeeklyNotices, fallbackWeeklyNotices = {}) => {
+  const source = isPlainObject(sourceWeeklyNotices) ? sourceWeeklyNotices : {};
+  const fallback = isPlainObject(fallbackWeeklyNotices) ? fallbackWeeklyNotices : {};
+  const next = {};
+
+  WEEKS.forEach((weekName) => {
+    const sourceValue = source[weekName];
+    const fallbackValue = fallback[weekName];
+    if (typeof sourceValue === 'string') {
+      next[weekName] = sourceValue;
+      return;
+    }
+    next[weekName] = typeof fallbackValue === 'string' ? fallbackValue : '';
+  });
+
+  return next;
+};
+
 const normalizePayloadForSync = (payload, fallbackSnapshot) => {
   if (!isPlainObject(payload) || !isPlainObject(fallbackSnapshot)) return null;
 
@@ -414,13 +432,18 @@ const normalizePayloadForSync = (payload, fallbackSnapshot) => {
   const changeLogs = Array.isArray(payload.changeLogs)
     ? payload.changeLogs
     : (Array.isArray(fallbackSnapshot.changeLogs) ? fallbackSnapshot.changeLogs : []);
+  const weeklyNotices = normalizeWeeklyNoticesForSync(
+    payload.weeklyNotices,
+    fallbackSnapshot.weeklyNotices
+  );
 
   return {
     allSchedules,
     standardHours,
     teacherConfigs,
     specialTemplates,
-    changeLogs
+    changeLogs,
+    weeklyNotices
   };
 };
 
@@ -447,7 +470,9 @@ export default function TimetableApp() {
   const [undoStack, setUndoStack] = useState([]);
   const [redoStack, setRedoStack] = useState([]);
   const [changeLogs, setChangeLogs] = useState([]);
+  const [weeklyNotices, setWeeklyNotices] = useState(() => normalizeWeeklyNoticesForSync({}));
   const [showChangeSummary, setShowChangeSummary] = useState(false);
+  const [baselineReady, setBaselineReady] = useState(false);
 
   // 기준 시수 상태 관리
   const [standardHours, setStandardHours] = useState(() => {
@@ -585,6 +610,15 @@ export default function TimetableApp() {
 
     return map;
   }, [teacherConfigs, normalizedSpecialTemplates]);
+  const hasConfiguredSpecialTemplate = useMemo(
+    () =>
+      teacherConfigs.some((teacher) =>
+        (normalizedSpecialTemplates[teacher.id] || []).some((row) =>
+          Array.isArray(row) && row.some((cell) => typeof cell?.className === 'string' && cell.className.trim() !== '')
+        )
+      ),
+    [teacherConfigs, normalizedSpecialTemplates]
+  );
 
   useEffect(() => {
     if (!toast.show) return undefined;
@@ -684,10 +718,96 @@ export default function TimetableApp() {
     showNotification('취소된 변경을 다시 적용했습니다.', 'success', { actionType: 'undo', duration: 5500 });
   };
 
-  const currentWeekChangeLogs = useMemo(
-    () => changeLogs.filter((log) => Array.isArray(log.weekKeys) && log.weekKeys.includes(currentWeekName)),
-    [changeLogs, currentWeekName]
-  );
+  const currentWeekNotice = weeklyNotices[currentWeekName] || '';
+
+  const isExpectedSpecialMatch = (actualCell, expectedEntry) => {
+    if (!isSpecialLikeCell(actualCell) || !expectedEntry) return false;
+    const actualTeacherId = typeof actualCell.teacherId === 'string' ? actualCell.teacherId : '';
+    const expectedTeacherId = typeof expectedEntry.teacherId === 'string' ? expectedEntry.teacherId : '';
+    const actualTeacher = typeof actualCell.teacher === 'string' ? actualCell.teacher.trim() : '';
+    const expectedTeacher = typeof expectedEntry.teacher === 'string' ? expectedEntry.teacher.trim() : '';
+    const actualSubject = typeof actualCell.subject === 'string' ? actualCell.subject.trim() : '';
+    const expectedSubject = typeof expectedEntry.subject === 'string' ? expectedEntry.subject.trim() : '';
+
+    const teacherMatched = actualTeacherId && expectedTeacherId
+      ? actualTeacherId === expectedTeacherId
+      : actualTeacher === expectedTeacher;
+
+    return teacherMatched && actualSubject === expectedSubject;
+  };
+
+  const formatExpectedSpecialLabel = (expectedEntries) => {
+    if (!Array.isArray(expectedEntries) || expectedEntries.length === 0) return '전담 없음';
+    return expectedEntries
+      .map((entry) => `${entry.subject || '전담'}${entry.teacher ? `(${entry.teacher})` : ''}`)
+      .join(' / ');
+  };
+
+  const formatActualSpecialLabel = (actualCell) => {
+    if (!isSpecialLikeCell(actualCell)) return '전담 해제';
+    const subject = (actualCell.subject || '').trim() || '전담';
+    const teacher = (actualCell.teacher || '').trim();
+    return teacher ? `${subject}(${teacher})` : subject;
+  };
+
+  const currentWeekSpecialChangeItems = useMemo(() => {
+    const weekSchedule = allSchedules?.[currentWeekName];
+    if (!weekSchedule) return [];
+    if (!hasConfiguredSpecialTemplate && !baselineSchedulesRef.current) return [];
+
+    const items = [];
+
+    CLASSES.forEach((className) => {
+      for (let p = 0; p < PERIODS.length; p++) {
+        for (let d = 0; d < DAYS.length; d++) {
+          let expectedEntries = [];
+          if (hasConfiguredSpecialTemplate) {
+            const expectedRaw = templateExpectationMap[className]?.[p]?.[d] ?? null;
+            expectedEntries = Array.isArray(expectedRaw)
+              ? expectedRaw
+              : (expectedRaw ? [expectedRaw] : []);
+          } else {
+            const baselineCell = baselineSchedulesRef.current?.[currentWeekName]?.[className]?.[p]?.[d];
+            expectedEntries = isSpecialLikeCell(baselineCell)
+              ? [{
+                teacherId: baselineCell.teacherId || '',
+                teacher: baselineCell.teacher || '',
+                subject: baselineCell.subject || '',
+                location: (baselineCell.location || '').trim()
+              }]
+              : [];
+          }
+          const actualCell = weekSchedule?.[className]?.[p]?.[d];
+
+          if (!isSpecialLikeCell(actualCell) && expectedEntries.length === 0) continue;
+          if (actualCell?.type === 'holiday' || actualCell?.subject === '휴업일') {
+            if (expectedEntries.length === 0) continue;
+            items.push({
+              id: `${className}-${p}-${d}`,
+              summary: `${className} ${DAYS[d]}요일 ${PERIODS[p]}교시: ${formatExpectedSpecialLabel(expectedEntries)} → 휴업일`,
+              weekName: currentWeekName
+            });
+            continue;
+          }
+
+          const expectedMatched = expectedEntries.some((expected) => isExpectedSpecialMatch(actualCell, expected));
+          const hasDifference = expectedEntries.length > 0
+            ? !expectedMatched
+            : isSpecialLikeCell(actualCell);
+
+          if (!hasDifference) continue;
+
+          items.push({
+            id: `${className}-${p}-${d}`,
+            summary: `${className} ${DAYS[d]}요일 ${PERIODS[p]}교시: ${formatExpectedSpecialLabel(expectedEntries)} → ${formatActualSpecialLabel(actualCell)}`,
+            weekName: currentWeekName
+          });
+        }
+      }
+    });
+
+    return items;
+  }, [allSchedules, currentWeekName, templateExpectationMap, hasConfiguredSpecialTemplate, baselineReady]);
 
   const quickEditorActionGuideText = useMemo(() => {
     if (quickEditorAction === 'swap') {
@@ -700,13 +820,15 @@ export default function TimetableApp() {
   }, [quickEditorAction]);
 
   const copyCurrentWeekChangeSummary = async () => {
-    const lines = currentWeekChangeLogs
-      .slice()
-      .reverse()
-      .map((log) => log.announcementText || log.summary);
-    const text = lines.length > 0
-      ? lines.join('\n')
-      : `${currentWeekName}: 변경사항이 없습니다.`;
+    const noticeText = currentWeekNotice.trim();
+    const changeLines = currentWeekSpecialChangeItems.map((item) => item.summary);
+    const text = [
+      `[${currentWeekName}] 공지사항`,
+      noticeText || '공지사항 없음',
+      '',
+      `[${currentWeekName}] 전담 변경사항`,
+      ...(changeLines.length > 0 ? changeLines : ['전담 변경사항 없음'])
+    ].join('\n');
 
     try {
       if (navigator?.clipboard?.writeText) {
@@ -719,7 +841,7 @@ export default function TimetableApp() {
         document.execCommand('copy');
         document.body.removeChild(textarea);
       }
-      showNotification('변경사항 요약을 복사했습니다.', 'success');
+      showNotification('공지 및 변경사항을 복사했습니다.', 'success');
     } catch (_error) {
       showNotification('클립보드 복사에 실패했습니다.', 'error');
     }
@@ -768,6 +890,7 @@ export default function TimetableApp() {
     if (baselineSchedulesRef.current) return;
     if (isSupabaseConfigured && !isRemoteReadyRef.current) return;
     baselineSchedulesRef.current = cloneSchedulesForHistory(allSchedules);
+    setBaselineReady(true);
   }, [allSchedules, syncStatus]);
 
   useEffect(() => {
@@ -1110,7 +1233,8 @@ export default function TimetableApp() {
       standardHours,
       teacherConfigs,
       specialTemplates: normalizeSpecialTemplates(teacherConfigs, specialTemplates),
-      changeLogs
+      changeLogs,
+      weeklyNotices
     });
 
     const applyRemotePayload = (payload, syncedAt, updatedBy, fallbackSnapshot = getFallbackSnapshot()) => {
@@ -1122,7 +1246,8 @@ export default function TimetableApp() {
         standardHours: normalizedPayload.standardHours,
         teacherConfigs: normalizedPayload.teacherConfigs,
         specialTemplates: normalizedPayload.specialTemplates,
-        changeLogs: normalizedPayload.changeLogs
+        changeLogs: normalizedPayload.changeLogs,
+        weeklyNotices: normalizedPayload.weeklyNotices
       };
 
       isApplyingRemoteRef.current = true;
@@ -1132,6 +1257,7 @@ export default function TimetableApp() {
       setTeacherConfigs(payloadForSync.teacherConfigs);
       setSpecialTemplates(payloadForSync.specialTemplates);
       setChangeLogs(Array.isArray(payloadForSync.changeLogs) ? payloadForSync.changeLogs : []);
+      setWeeklyNotices(normalizeWeeklyNoticesForSync(payloadForSync.weeklyNotices));
       lastSyncedPayloadRef.current = JSON.stringify(payloadForSync);
       setLastSyncedAt(syncedAt || new Date().toISOString());
       setLastUpdatedBy(updatedBy || null);
@@ -1248,7 +1374,7 @@ export default function TimetableApp() {
     if (!isRemoteReadyRef.current) return undefined;
     if (isApplyingRemoteRef.current) return undefined;
 
-    const payload = { allSchedules, standardHours, teacherConfigs, specialTemplates, changeLogs };
+    const payload = { allSchedules, standardHours, teacherConfigs, specialTemplates, changeLogs, weeklyNotices };
     const payloadText = JSON.stringify(payload);
 
     if (payloadText === lastSyncedPayloadRef.current) return undefined;
@@ -1274,7 +1400,7 @@ export default function TimetableApp() {
     return () => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     };
-  }, [allSchedules, standardHours, teacherConfigs, specialTemplates, changeLogs]);
+  }, [allSchedules, standardHours, teacherConfigs, specialTemplates, changeLogs, weeklyNotices]);
 
   const findTeacherOverlapClasses = (schedulesMap, weekName, className, periodIndex, dayIndex, teacherId) => {
     if (!teacherId) return [];
@@ -2564,7 +2690,7 @@ export default function TimetableApp() {
                       : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50'
                   }`}
                 >
-                  변경사항 보기
+                  공지 및 변경사항
                 </button>
               </div>
             </div>
@@ -2826,32 +2952,45 @@ export default function TimetableApp() {
           <div className="mb-4 bg-white border border-emerald-200 rounded-xl p-4 shadow-sm">
             <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-3">
               <div>
-                <h3 className="font-bold text-emerald-900">이번 주 변경사항 요약</h3>
+                <h3 className="font-bold text-emerald-900">공지 및 변경사항</h3>
                 <p className="text-xs text-emerald-700">
-                  [{currentWeekName}] 기준 {currentWeekChangeLogs.length}건
+                  [{currentWeekName}] 기준 전담 변경 {currentWeekSpecialChangeItems.length}건
                 </p>
               </div>
               <button
                 onClick={copyCurrentWeekChangeSummary}
                 className="px-3 py-2 bg-emerald-600 text-white rounded-lg text-sm font-bold hover:bg-emerald-700 w-full md:w-auto"
               >
-                공지용 텍스트 복사
+                공지/변경 복사
               </button>
             </div>
 
-            {currentWeekChangeLogs.length > 0 ? (
+            <div className="border border-blue-200 rounded-lg p-3 bg-blue-50/50 mb-3">
+              <p className="text-sm font-bold text-blue-900 mb-2">공지사항</p>
+              <textarea
+                value={currentWeekNotice}
+                onChange={(e) =>
+                  setWeeklyNotices((prev) => ({
+                    ...prev,
+                    [currentWeekName]: e.target.value
+                  }))
+                }
+                placeholder="예) 4.17(금) 체육대회, 5교시까지 운영 / 4.18(토) 과학행사 준비"
+                className="w-full min-h-[110px] border border-blue-200 rounded-md p-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-400"
+              />
+              <p className="mt-1 text-[11px] text-blue-700">해당 주차 공지사항은 자동 저장되어 다른 선생님과 공유됩니다.</p>
+            </div>
+
+            {currentWeekSpecialChangeItems.length > 0 ? (
               <div className="max-h-72 overflow-auto space-y-2">
-                {currentWeekChangeLogs.map((log) => (
-                  <div key={log.id} className="border border-gray-200 rounded-lg p-2 bg-gray-50">
-                    <p className="text-sm font-semibold text-gray-800">{log.summary}</p>
-                    <p className="text-xs text-gray-500">
-                      {new Date(log.updatedAt).toLocaleString('ko-KR')} · {log.updatedBy || 'unknown'}
-                    </p>
+                {currentWeekSpecialChangeItems.map((item) => (
+                  <div key={item.id} className="border border-gray-200 rounded-lg p-2 bg-gray-50">
+                    <p className="text-sm font-semibold text-gray-800">{item.summary}</p>
                   </div>
                 ))}
               </div>
             ) : (
-              <p className="text-sm text-gray-500">이번 주 변경사항이 아직 없습니다.</p>
+              <p className="text-sm text-gray-500">이번 주 전담 변경사항이 없습니다.</p>
             )}
           </div>
         )}
