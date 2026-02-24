@@ -1454,20 +1454,19 @@ export default function TimetableApp() {
     // 휴업일은 설정에서 의도적으로 지정한 예외로 간주
     if (actual.type === 'holiday' || actual.subject === '휴업일') return false;
 
+    // 과학/체육/음악은 담임 수업으로 운용 가능하므로 템플릿 불일치에서 제외
+    if (
+      actual.type === 'homeroom' &&
+      HOMEROOM_FLEX_SUBJECTS.includes((actual.subject || '').trim())
+    ) {
+      return false;
+    }
+
     // 템플릿에 동일 슬롯의 기대값이 2개 이상이면 템플릿 자체 충돌로 간주
     if (Array.isArray(expected)) return true;
 
     if (!expected) {
       return actual.type === 'special';
-    }
-
-    // 과학/체육/음악은 담임 수업도 허용 (전담 템플릿과 과목만 동일하면 불일치 아님)
-    if (
-      actual.type === 'homeroom' &&
-      HOMEROOM_FLEX_SUBJECTS.includes(actual.subject || '') &&
-      expected.subject === (actual.subject || '')
-    ) {
-      return false;
     }
 
     if (actual.type !== 'special') return true;
