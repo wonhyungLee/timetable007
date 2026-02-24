@@ -1054,6 +1054,17 @@ export default function TimetableApp() {
     return `[경고] [${weekName}] ${DAYS[dayIndex]} ${PERIODS[periodIndex]}교시 ${className} 수업이 ${teacherName} 선생님 기준 ${overlapClasses.join(', ')}와 중복됩니다. (변경은 적용됨)`;
   };
 
+  const buildTemplateMismatchNotice = (weekName, className, periodIndex, dayIndex, cell) => {
+    if (!isCellMismatchedWithTemplate(className, periodIndex, dayIndex, cell)) return '';
+    return `[안내] [${weekName}] ${DAYS[dayIndex]} ${PERIODS[periodIndex]}교시 ${className} 수업이 전담 템플릿과 달라 파란색 테두리로 표시됩니다.`;
+  };
+
+  const getConflictBorderClassName = (hasTemplateMismatch, hasTeacherConflict) => {
+    if (hasTeacherConflict) return 'border-red-500 border-2 ';
+    if (hasTemplateMismatch) return 'border-blue-500 border-2 ';
+    return '';
+  };
+
   const openCellSubjectContextMenu = (e, weekName, className, p, d) => {
     if (isSpacePanMode) return;
     e.preventDefault();
@@ -1168,12 +1179,17 @@ export default function TimetableApp() {
       const warnings = [validation.reason];
       const movedCellWarning = buildTeacherOverlapWarning(wName, cName, p, d, newAllSchedules[wName][cName][p][d], newAllSchedules);
       const sourceCellWarning = buildTeacherOverlapWarning(w1, c1, p1, d1, newAllSchedules[w1][c1][p1][d1], newAllSchedules);
+      const movedCellMismatchNotice = buildTemplateMismatchNotice(wName, cName, p, d, newAllSchedules[wName][cName][p][d]);
+      const sourceCellMismatchNotice = buildTemplateMismatchNotice(w1, c1, p1, d1, newAllSchedules[w1][c1][p1][d1]);
       if (movedCellWarning) warnings.push(movedCellWarning);
       if (sourceCellWarning) warnings.push(sourceCellWarning);
+      const notices = [movedCellMismatchNotice, sourceCellMismatchNotice];
       const warningMessage = [...new Set(warnings.filter(Boolean))].join(' ');
+      const noticeMessage = [...new Set(notices.filter(Boolean))].join(' ');
+      const mergedMessage = [warningMessage, noticeMessage].filter(Boolean).join(' ');
 
-      if (warningMessage) {
-        showNotification(warningMessage, 'error');
+      if (mergedMessage) {
+        showNotification(mergedMessage, warningMessage ? 'error' : 'info');
       } else {
         showNotification(`시간표가 성공적으로 변경되었습니다!`, 'success');
       }
@@ -1244,8 +1260,13 @@ export default function TimetableApp() {
     }
 
     const warning = buildTeacherOverlapWarning(weekName, className, p, d, nextCell, newAllSchedules);
+    const mismatchNotice = buildTemplateMismatchNotice(weekName, className, p, d, nextCell);
     if (warning) {
-      showNotification(warning, 'error');
+      showNotification([warning, mismatchNotice].filter(Boolean).join(' '), 'error');
+      return;
+    }
+    if (mismatchNotice) {
+      showNotification(mismatchNotice, 'info');
       return;
     }
 
@@ -1431,13 +1452,11 @@ export default function TimetableApp() {
   const getCellStyles = (p, d, cell) => {
     const isSelected = selectedCell?.weekName === currentWeekName && selectedCell?.className === currentClass && selectedCell?.p === p && selectedCell?.d === d;
     const hasTeacherConflict = hasTeacherOverlapConflict(currentWeekName, currentClass, p, d, cell);
+    const hasTemplateMismatch = isCellMismatchedWithTemplate(currentClass, p, d, cell);
     let baseStyle = "relative transition-all duration-200 ease-in-out border border-gray-300 p-2 h-24 flex flex-col items-center justify-center cursor-pointer font-medium text-lg rounded-sm ";
     
     baseStyle += getTimetableCellColor(cell) + " ";
-
-    if (isCellMismatchedWithTemplate(currentClass, p, d, cell) || hasTeacherConflict) {
-      baseStyle += "border-red-500 border-2 ";
-    }
+    baseStyle += getConflictBorderClassName(hasTemplateMismatch, hasTeacherConflict);
 
     if (isSelected) baseStyle += "ring-4 ring-yellow-400 transform scale-105 z-10 shadow-lg ";
 
@@ -1490,12 +1509,10 @@ export default function TimetableApp() {
   const getCompactCellStyles = (className, p, d, cell) => {
     const isSelected = selectedCell?.weekName === currentWeekName && selectedCell?.className === className && selectedCell?.p === p && selectedCell?.d === d;
     const hasTeacherConflict = hasTeacherOverlapConflict(currentWeekName, className, p, d, cell);
+    const hasTemplateMismatch = isCellMismatchedWithTemplate(className, p, d, cell);
     let baseStyle = 'relative transition-all duration-150 ease-in-out border border-gray-300 p-1 h-[60px] flex flex-col items-center justify-center cursor-pointer rounded ';
     baseStyle += getTimetableCellColor(cell) + ' ';
-
-    if (isCellMismatchedWithTemplate(className, p, d, cell) || hasTeacherConflict) {
-      baseStyle += 'border-red-500 border-2 ';
-    }
+    baseStyle += getConflictBorderClassName(hasTemplateMismatch, hasTeacherConflict);
 
     if (isSelected) baseStyle += 'ring-2 ring-yellow-400 scale-[1.03] z-20 shadow ';
 
@@ -1621,12 +1638,10 @@ export default function TimetableApp() {
   const getMonthlyClassCellStyles = (weekName, className, p, d, cell, dense = false) => {
     const isSelected = selectedCell?.weekName === weekName && selectedCell?.className === className && selectedCell?.p === p && selectedCell?.d === d;
     const hasTeacherConflict = hasTeacherOverlapConflict(weekName, className, p, d, cell);
+    const hasTemplateMismatch = isCellMismatchedWithTemplate(className, p, d, cell);
     let baseStyle = `relative transition-all duration-150 ease-in-out border border-gray-300 ${dense ? 'p-0.5 h-[52px] rounded-sm' : 'p-1 h-[78px] rounded'} flex flex-col items-center justify-center cursor-pointer `;
     baseStyle += getTimetableCellColor(cell) + ' ';
-
-    if (isCellMismatchedWithTemplate(className, p, d, cell) || hasTeacherConflict) {
-      baseStyle += 'border-red-500 border-2 ';
-    }
+    baseStyle += getConflictBorderClassName(hasTemplateMismatch, hasTeacherConflict);
     if (isSelected) baseStyle += dense ? 'ring-1 ring-yellow-400 z-20 shadow ' : 'ring-2 ring-yellow-400 scale-[1.02] z-20 shadow ';
 
     let overlay = null;
@@ -1874,10 +1889,10 @@ export default function TimetableApp() {
               return (
                 <div className="flex flex-wrap items-center gap-2 text-xs">
                   {hasMismatch && (
-                    <span className="px-2 py-1 rounded bg-rose-50 text-rose-700 border border-rose-200 font-semibold">빨간 테두리 원인: 템플릿 불일치</span>
+                    <span className="px-2 py-1 rounded bg-blue-50 text-blue-700 border border-blue-200 font-semibold">파란 테두리 원인: 전담 템플릿 불일치</span>
                   )}
                   {hasOverlap && (
-                    <span className="px-2 py-1 rounded bg-amber-50 text-amber-700 border border-amber-200 font-semibold">빨간 테두리 원인: 전담 중복 배치</span>
+                    <span className="px-2 py-1 rounded bg-rose-50 text-rose-700 border border-rose-200 font-semibold">빨간 테두리 원인: 전담 중복 배치</span>
                   )}
                 </div>
               );
@@ -1931,8 +1946,8 @@ export default function TimetableApp() {
         )}
 
         {toast.show && (
-          <div className={`fixed top-6 left-1/2 transform -translate-x-1/2 z-50 px-6 py-3 rounded-full shadow-lg flex items-center gap-2 animate-bounce ${toast.type === 'error' ? 'bg-red-600 text-white' : 'bg-green-600 text-white'}`}>
-            {toast.type === 'error' ? <AlertCircle size={20} /> : <CheckCircle size={20} />}
+          <div className={`fixed top-6 left-1/2 transform -translate-x-1/2 z-50 px-6 py-3 rounded-full shadow-lg flex items-center gap-2 animate-bounce ${toast.type === 'error' ? 'bg-red-600 text-white' : toast.type === 'info' ? 'bg-blue-600 text-white' : 'bg-green-600 text-white'}`}>
+            {toast.type === 'error' ? <AlertCircle size={20} /> : toast.type === 'info' ? <Info size={20} /> : <CheckCircle size={20} />}
             <span className="font-semibold">{toast.message}</span>
           </div>
         )}
@@ -2040,7 +2055,7 @@ export default function TimetableApp() {
               <h2 className="text-xl font-bold text-gray-800">
                 <span className="text-blue-600">[{currentWeekName}]</span> 전체 학급 주간 시간표
               </h2>
-              <p className="text-xs text-gray-500">각 학급 주간표를 전체 화면에 배치했습니다. 템플릿과 다른 칸은 빨간 테두리로 표시되며 텍스트 크기는 상단 슬라이더로 조정할 수 있습니다.</p>
+              <p className="text-xs text-gray-500">각 학급 주간표를 전체 화면에 배치했습니다. 전담 중복은 빨간 테두리, 전담 템플릿 불일치는 파란 테두리로 표시되며 텍스트 크기는 상단 슬라이더로 조정할 수 있습니다.</p>
             </div>
             <div className="p-3 md:p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
               {CLASSES.map((cls) => (
@@ -2114,7 +2129,7 @@ export default function TimetableApp() {
             <div className="bg-indigo-50 border-b border-indigo-100 p-3 flex justify-between items-center shrink-0">
               <div className="flex items-center gap-2">
                 <Info className="text-indigo-500" size={18} />
-                <span className="text-sm text-indigo-800 font-medium">월간 조망 화면에서는 <strong>다른 학급의 전담 수업과도 자유롭게 교환</strong>할 수 있습니다! 템플릿과 다른 칸은 빨간 테두리로 표시됩니다.</span>
+                <span className="text-sm text-indigo-800 font-medium">월간 조망 화면에서는 <strong>다른 학급의 전담 수업과도 자유롭게 교환</strong>할 수 있습니다! 전담 중복은 빨간 테두리, 전담 템플릿 불일치는 파란 테두리로 표시됩니다.</span>
               </div>
             </div>
             <div className="overflow-auto flex-1 relative">
@@ -2158,7 +2173,7 @@ export default function TimetableApp() {
                               
                               let cellClass = `border border-gray-200 p-1 text-center h-14 relative cursor-pointer transition-all ${isDimmed ? 'opacity-20 grayscale ' : ''} ${isHighlighted ? 'ring-2 ring-inset ring-red-500 font-bold transform scale-105 z-10 shadow-md ' : ''}`;
                               cellClass += getTimetableCellColor(cell) + " ";
-                              if (isTemplateMismatch || isTeacherConflict) cellClass += "border-red-500 border-2 ";
+                              cellClass += getConflictBorderClassName(isTemplateMismatch, isTeacherConflict);
 
                               if (isSelected) cellClass += "ring-4 ring-yellow-400 transform scale-105 z-20 shadow-lg ";
 
@@ -2205,7 +2220,7 @@ export default function TimetableApp() {
             <div className="bg-indigo-50 border-b border-indigo-100 p-3 flex justify-between items-center">
               <div className="flex items-center gap-2">
                 <Info className="text-indigo-500" size={18} />
-                <span className="text-sm text-indigo-800 font-medium">종합표와 같은 내용(전체 학급)을 주차별 카드 형태로 표시합니다. 템플릿과 다른 칸은 빨간 테두리로 표시되며, Space+클릭 드래그로 가로/세로 이동할 수 있습니다.</span>
+                <span className="text-sm text-indigo-800 font-medium">종합표와 같은 내용(전체 학급)을 주차별 카드 형태로 표시합니다. 전담 중복은 빨간 테두리, 전담 템플릿 불일치는 파란 테두리로 표시되며, Space+클릭 드래그로 가로/세로 이동할 수 있습니다.</span>
               </div>
             </div>
             <div className="p-2 md:p-3 grid grid-cols-1 gap-3">
