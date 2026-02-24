@@ -1849,14 +1849,16 @@ export default function TimetableApp() {
       const newAllSchedules = { ...allSchedules };
       const w1 = selectedCell.weekName; const c1 = selectedCell.className; const p1 = selectedCell.p; const d1 = selectedCell.d;
 
-      newAllSchedules[w1] = { ...newAllSchedules[w1] };
-      newAllSchedules[w1][c1] = [...newAllSchedules[w1][c1]];
-      newAllSchedules[w1][c1][p1] = [...newAllSchedules[w1][c1][p1]];
+      const cloneEditableSlot = (schedulesMap, weekName, className, periodIndex) => {
+        // 소스/타깃 슬롯을 독립 복사해 원본 state 오염(undo 스냅샷 깨짐)을 방지한다.
+        schedulesMap[weekName] = { ...schedulesMap[weekName] };
+        schedulesMap[weekName][className] = [...schedulesMap[weekName][className]];
+        schedulesMap[weekName][className][periodIndex] = [...schedulesMap[weekName][className][periodIndex]];
+      };
 
-      if (w1 !== wName) {
-        newAllSchedules[wName] = { ...newAllSchedules[wName] };
-        newAllSchedules[wName][cName] = [...newAllSchedules[wName][cName]];
-        newAllSchedules[wName][cName][p] = [...newAllSchedules[wName][cName][p]];
+      cloneEditableSlot(newAllSchedules, w1, c1, p1);
+      if (!(w1 === wName && c1 === cName && p1 === p)) {
+        cloneEditableSlot(newAllSchedules, wName, cName, p);
       }
 
       const targetOriginalCell = newAllSchedules[wName][cName][p][d];
