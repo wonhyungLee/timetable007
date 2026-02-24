@@ -268,6 +268,7 @@ export default function TimetableApp() {
   const [compactTextScalePercent, setCompactTextScalePercent] = useState(100);
   const [monthlyTextScalePercent, setMonthlyTextScalePercent] = useState(100);
   const [isTopHeaderHidden, setIsTopHeaderHidden] = useState(false);
+  const [isSpacePanMode, setIsSpacePanMode] = useState(false);
   const [currentWeekIndex, setCurrentWeekIndex] = useState(0);
   const [currentClass, setCurrentClass] = useState('1반');
   const [selectedCell, setSelectedCell] = useState(null);
@@ -291,6 +292,7 @@ export default function TimetableApp() {
   const lastSyncedPayloadRef = useRef('');
   const saveTimerRef = useRef(null);
   const clientIdRef = useRef(`client-${Math.random().toString(36).slice(2, 10)}`);
+  const panDragRef = useRef(null);
   
   const currentWeekName = WEEKS[currentWeekIndex];
   const schedules = allSchedules[currentWeekName];
@@ -350,6 +352,80 @@ export default function TimetableApp() {
       return () => clearTimeout(timer);
     }
   }, [toast]);
+
+  useEffect(() => {
+    const stopPanDrag = () => {
+      const dragging = panDragRef.current;
+      if (!dragging) return;
+      dragging.el.style.cursor = '';
+      dragging.el.style.userSelect = '';
+      panDragRef.current = null;
+    };
+
+    const isTypingLikeElement = (el) => {
+      if (!el || !(el instanceof HTMLElement)) return false;
+      const tag = el.tagName;
+      if (['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(tag)) return true;
+      return el.isContentEditable;
+    };
+
+    const handleKeyDown = (e) => {
+      if (e.code !== 'Space') return;
+      if (isTypingLikeElement(e.target) || isTypingLikeElement(document.activeElement)) return;
+      setIsSpacePanMode(true);
+      e.preventDefault();
+    };
+
+    const handleKeyUp = (e) => {
+      if (e.code !== 'Space') return;
+      setIsSpacePanMode(false);
+      stopPanDrag();
+    };
+
+    const handleBlur = () => {
+      setIsSpacePanMode(false);
+      stopPanDrag();
+    };
+
+    window.addEventListener('keydown', handleKeyDown, { passive: false });
+    window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', handleBlur);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('blur', handleBlur);
+    };
+  }, []);
+
+  useEffect(() => {
+    const stopPanDrag = () => {
+      const dragging = panDragRef.current;
+      if (!dragging) return;
+      dragging.el.style.cursor = '';
+      dragging.el.style.userSelect = '';
+      panDragRef.current = null;
+    };
+
+    const handleMouseMove = (e) => {
+      const dragging = panDragRef.current;
+      if (!dragging) return;
+      const dx = e.clientX - dragging.startX;
+      const dy = e.clientY - dragging.startY;
+      dragging.el.scrollLeft = dragging.startScrollLeft - dx;
+      dragging.el.scrollTop = dragging.startScrollTop - dy;
+      e.preventDefault();
+    };
+
+    const handleMouseUp = () => stopPanDrag();
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, []);
 
   const showNotification = (message, type = 'error') => setToast({ show: true, message, type });
   const teacherAssignableSubjects = ALL_SUBJECTS.filter(subject => subject !== '휴업일');
@@ -999,39 +1075,56 @@ export default function TimetableApp() {
     return Math.max(minPx, Math.min(maxPx, scaled));
   };
 
-  const getMonthlyClassSubjectTextStyle = (subject, hasTeacherLine, dense = false) => {
+  const getMonthlyDenseCellFitScale = (cell) => {
+    const subjectText = cell?.subject === '휴업일' ? '휴업' : (cell?.subject || '-');
+    const teacherText = cell?.type === 'special' && cell?.teacher ? cell.teacher : '';
+    const locationText = cell?.location ? String(cell.location) : '';
+    const rows = [subjectText, teacherText, locationText].filter(Boolean);
+    const requiredRows = rows.reduce((sum, text) => sum + Math.max(1, Math.ceil(text.length / 6)), 0);
+    const rowCapacity = 6;
+    const rowPenalty = rowCapacity / Math.max(rowCapacity, requiredRows);
+    const totalLength = rows.join('').length;
+    const lengthPenalty = totalLength > 26 ? (26 / totalLength) : 1;
+
+    return Math.max(0.4, Math.min(1, rowPenalty * lengthPenalty));
+  };
+
+  const getMonthlyClassSubjectTextStyle = (subject, hasTeacherLine, dense = false, fitScale = 1) => {
     const px = getMonthlyFittedTextPx(subject || '-', {
       baseWidthPx: dense ? 42 : 100,
       maxHeightPx: dense ? (hasTeacherLine ? 10.5 : 14.5) : (hasTeacherLine ? 15 : 24),
-      minPx: dense ? 6.5 : 9,
+      minPx: dense ? 4.2 : 9,
       maxPx: dense ? 18 : 28
     });
-    return { fontSize: `${px.toFixed(1)}px`, lineHeight: dense ? 1.02 : 1.08 };
+    const adjusted = Math.max(dense ? 4.2 : 9, px * fitScale);
+    return { fontSize: `${adjusted.toFixed(1)}px`, lineHeight: dense ? 1 : 1.08 };
   };
 
-  const getMonthlyClassTeacherTextStyle = (teacher, dense = false) => {
+  const getMonthlyClassTeacherTextStyle = (teacher, dense = false, fitScale = 1) => {
     const px = getMonthlyFittedTextPx(teacher || '-', {
       baseWidthPx: dense ? 42 : 100,
       maxHeightPx: dense ? 8.5 : 12,
-      minPx: dense ? 6 : 8,
+      minPx: dense ? 3.8 : 8,
       maxPx: dense ? 12 : 16
     });
-    return { fontSize: `${px.toFixed(1)}px`, lineHeight: 1.02 };
+    const adjusted = Math.max(dense ? 3.8 : 8, px * fitScale);
+    return { fontSize: `${adjusted.toFixed(1)}px`, lineHeight: dense ? 1 : 1.02 };
   };
 
-  const getMonthlyClassLocationTextStyle = (location, dense = false) => {
+  const getMonthlyClassLocationTextStyle = (location, dense = false, fitScale = 1) => {
     const px = getMonthlyFittedTextPx(location || '-', {
       baseWidthPx: dense ? 42 : 100,
       maxHeightPx: dense ? 8 : 11,
-      minPx: dense ? 5.5 : 7,
+      minPx: dense ? 3.5 : 7,
       maxPx: dense ? 11 : 14
     });
-    return { fontSize: `${px.toFixed(1)}px`, lineHeight: 1.02 };
+    const adjusted = Math.max(dense ? 3.5 : 7, px * fitScale);
+    return { fontSize: `${adjusted.toFixed(1)}px`, lineHeight: dense ? 1 : 1.02 };
   };
 
   const getMonthlyClassCellStyles = (weekName, className, p, d, cell, dense = false) => {
     const isSelected = selectedCell?.weekName === weekName && selectedCell?.className === className && selectedCell?.p === p && selectedCell?.d === d;
-    let baseStyle = `relative transition-all duration-150 ease-in-out border border-gray-300 ${dense ? 'p-0.5 h-[44px] rounded-sm' : 'p-1 h-[78px] rounded'} flex flex-col items-center justify-center cursor-pointer `;
+    let baseStyle = `relative transition-all duration-150 ease-in-out border border-gray-300 ${dense ? 'p-0.5 h-[52px] rounded-sm' : 'p-1 h-[78px] rounded'} flex flex-col items-center justify-center cursor-pointer `;
     baseStyle += getSubjectColor(cell.subject) + ' ';
 
     if (isCellMismatchedWithTemplate(className, p, d, cell)) {
@@ -1051,6 +1144,21 @@ export default function TimetableApp() {
     }
 
     return { style: baseStyle, overlay };
+  };
+
+  const handlePanSurfaceMouseDown = (e) => {
+    if (!isSpacePanMode || e.button !== 0) return;
+    const el = e.currentTarget;
+    panDragRef.current = {
+      el,
+      startX: e.clientX,
+      startY: e.clientY,
+      startScrollLeft: el.scrollLeft,
+      startScrollTop: el.scrollTop
+    };
+    el.style.cursor = 'grabbing';
+    el.style.userSelect = 'none';
+    e.preventDefault();
   };
 
   // --- 집계 로직 (전체 학급 교과 시수) ---
@@ -1519,7 +1627,7 @@ export default function TimetableApp() {
             <div className="bg-indigo-50 border-b border-indigo-100 p-3 flex justify-between items-center">
               <div className="flex items-center gap-2">
                 <Info className="text-indigo-500" size={18} />
-                <span className="text-sm text-indigo-800 font-medium">종합표와 같은 내용(전체 학급)을 주차별 카드 형태로 표시합니다. 템플릿과 다른 칸은 빨간 테두리로 표시됩니다.</span>
+                <span className="text-sm text-indigo-800 font-medium">종합표와 같은 내용(전체 학급)을 주차별 카드 형태로 표시합니다. 템플릿과 다른 칸은 빨간 테두리로 표시되며, Space+클릭 드래그로 가로/세로 이동할 수 있습니다.</span>
               </div>
             </div>
             <div className="p-2 md:p-3 grid grid-cols-1 gap-3">
@@ -1536,8 +1644,11 @@ export default function TimetableApp() {
                       <p className="text-xs font-bold text-indigo-900 truncate">{weekName}</p>
                       <span className="text-[11px] text-indigo-600 font-semibold">1반~12반</span>
                     </div>
-                    <div className="overflow-x-auto">
-                      <table className="w-full border-collapse min-w-[1800px] table-fixed">
+                    <div
+                      className={`overflow-auto ${isSpacePanMode ? 'cursor-grab select-none' : ''}`}
+                      onMouseDown={handlePanSurfaceMouseDown}
+                    >
+                      <table className="w-full border-collapse min-w-[3200px] table-fixed">
                         <thead>
                           <tr>
                             <th rowSpan={2} className="p-1 w-10 text-[10px] text-gray-500 bg-gray-50 border border-gray-200">교시</th>
@@ -1579,17 +1690,25 @@ export default function TimetableApp() {
                                   const cell = weekSchedules[cls][pIdx][dIdx];
                                   const { style, overlay } = getMonthlyClassCellStyles(weekName, cls, pIdx, dIdx, cell, true);
                                   const hasTeacherLine = cell.type === 'special' && Boolean(cell.teacher);
+                                  const denseFitScale = getMonthlyDenseCellFitScale(cell);
                                   return (
                                     <td key={`monthly-all-cell-${weekName}-${pIdx}-${dIdx}-${cls}`} className="p-0.5 align-middle">
-                                      <div onClick={() => { setCurrentClass(cls); handleUniversalCellClick(weekName, cls, pIdx, dIdx); }} className={style}>
-                                        <span className="leading-tight font-semibold text-gray-800 truncate max-w-full px-0.5" style={getMonthlyClassSubjectTextStyle(cell.subject || '-', hasTeacherLine, true)}>
+                                      <div
+                                        onClick={() => {
+                                          if (isSpacePanMode) return;
+                                          setCurrentClass(cls);
+                                          handleUniversalCellClick(weekName, cls, pIdx, dIdx);
+                                        }}
+                                        className={style}
+                                      >
+                                        <span className="leading-tight font-semibold text-gray-800 max-w-full px-0.5 text-center whitespace-normal break-all" style={getMonthlyClassSubjectTextStyle(cell.subject || '-', hasTeacherLine, true, denseFitScale)}>
                                           {cell.subject === '휴업일' ? '휴업' : (cell.subject || '-')}
                                         </span>
                                         {cell.type === 'special' && cell.teacher && (
-                                          <span className="leading-tight text-gray-700 truncate max-w-full px-0.5" style={getMonthlyClassTeacherTextStyle(cell.teacher, true)}>{cell.teacher}</span>
+                                          <span className="leading-tight text-gray-700 max-w-full px-0.5 text-center whitespace-normal break-all" style={getMonthlyClassTeacherTextStyle(cell.teacher, true, denseFitScale)}>{cell.teacher}</span>
                                         )}
                                         {cell.location && (
-                                          <span className="leading-tight text-gray-600 truncate max-w-full px-0.5" style={getMonthlyClassLocationTextStyle(cell.location, true)}>
+                                          <span className="leading-tight text-gray-600 max-w-full px-0.5 text-center whitespace-normal break-all" style={getMonthlyClassLocationTextStyle(cell.location, true, denseFitScale)}>
                                             {cell.location}
                                           </span>
                                         )}
