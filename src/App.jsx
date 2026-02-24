@@ -131,10 +131,12 @@ const getSubjectColor = (subject) => {
   return colors[subject] || 'bg-white text-gray-700'; // 담임 과목은 기본 흰색
 };
 
+const isHolidayCell = (cell) => cell?.type === 'holiday' || cell?.subject === '휴업일';
+
 const getTimetableCellColor = (cell) => {
   const subject = cell?.subject || '';
   if (!subject) return getSubjectColor('');
-  if (cell?.type === 'holiday' || subject === '휴업일') return getSubjectColor('휴업일');
+  if (isHolidayCell(cell)) return getSubjectColor('휴업일');
   if (cell?.type !== 'special') return 'bg-white text-gray-700';
   return getSubjectColor(subject);
 };
@@ -281,17 +283,134 @@ const createHomeroomFallbackCell = (className, periodIndex, dayIndex) => ({
   id: `${className}-${periodIndex}-${dayIndex}`
 });
 
+const isPlainObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+const normalizeTeacherConfigsForSync = (sourceTeachers, fallbackTeachers = []) => {
+  if (!Array.isArray(sourceTeachers)) return fallbackTeachers;
+
+  const normalized = sourceTeachers
+    .filter((teacher) => teacher && typeof teacher === 'object')
+    .map((teacher, idx) => {
+      const safeId = typeof teacher.id === 'string' && teacher.id.trim()
+        ? teacher.id.trim()
+        : `teacher-${idx + 1}`;
+      const safeName = typeof teacher.name === 'string' && teacher.name.trim()
+        ? teacher.name.trim()
+        : `교사${idx + 1}`;
+      const safeSubject = typeof teacher.subject === 'string' && teacher.subject.trim()
+        ? teacher.subject.trim()
+        : (ALL_SUBJECTS[0] || '국어');
+      const safeClasses = Array.isArray(teacher.classes)
+        ? [...new Set(
+          teacher.classes
+            .map((cls) => Number(cls))
+            .filter((num) => Number.isInteger(num) && num >= 1 && num <= CLASSES.length)
+        )].sort((a, b) => a - b)
+        : [];
+
+      return {
+        id: safeId,
+        name: safeName,
+        subject: safeSubject,
+        classes: safeClasses
+      };
+    })
+    .filter((teacher) => teacher.classes.length > 0);
+
+  return normalized.length > 0 ? normalized : fallbackTeachers;
+};
+
+const normalizeStandardHoursForSync = (sourceStandardHours, fallbackStandardHours) => {
+  const next = { ...fallbackStandardHours };
+  if (!isPlainObject(sourceStandardHours)) return next;
+
+  ALL_SUBJECTS.forEach((subject) => {
+    const raw = sourceStandardHours[subject];
+    const value = typeof raw === 'number' ? raw : Number(raw);
+    if (Number.isFinite(value)) next[subject] = value;
+  });
+
+  return next;
+};
+
+const normalizeAllSchedulesForSync = (sourceAllSchedules, fallbackAllSchedules) => {
+  const next = {};
+
+  WEEKS.forEach((weekName) => {
+    const sourceWeek = isPlainObject(sourceAllSchedules?.[weekName]) ? sourceAllSchedules[weekName] : null;
+    const fallbackWeek = isPlainObject(fallbackAllSchedules?.[weekName]) ? fallbackAllSchedules[weekName] : {};
+    next[weekName] = {};
+
+    CLASSES.forEach((className) => {
+      const sourceGrid = Array.isArray(sourceWeek?.[className]) ? sourceWeek[className] : null;
+      const fallbackGrid = Array.isArray(fallbackWeek?.[className]) ? fallbackWeek[className] : null;
+
+      next[weekName][className] = Array.from({ length: PERIODS.length }, (_, pIdx) =>
+        Array.from({ length: DAYS.length }, (_, dIdx) => {
+          const fallbackCellRaw = fallbackGrid?.[pIdx]?.[dIdx];
+          const fallbackCell = isPlainObject(fallbackCellRaw)
+            ? { ...fallbackCellRaw }
+            : createHomeroomFallbackCell(className, pIdx, dIdx);
+          const rawCell = sourceGrid?.[pIdx]?.[dIdx];
+
+          if (!isPlainObject(rawCell)) return fallbackCell;
+
+          const subject = typeof rawCell.subject === 'string'
+            ? rawCell.subject
+            : (fallbackCell.subject || '');
+          const inferredType = typeof rawCell.type === 'string'
+            ? rawCell.type
+            : (subject === '휴업일' ? 'holiday' : (rawCell.teacherId ? 'special' : (subject ? 'homeroom' : 'empty')));
+
+          return {
+            ...fallbackCell,
+            ...rawCell,
+            subject,
+            type: inferredType,
+            teacherId: rawCell.teacherId ?? null,
+            teacher: typeof rawCell.teacher === 'string' ? rawCell.teacher : (fallbackCell.teacher || ''),
+            location: typeof rawCell.location === 'string' ? rawCell.location : (fallbackCell.location || ''),
+            id: typeof rawCell.id === 'string' ? rawCell.id : `${className}-${pIdx}-${dIdx}`
+          };
+        })
+      );
+    });
+  });
+
+  return next;
+};
+
+const normalizePayloadForSync = (payload, fallbackSnapshot) => {
+  if (!isPlainObject(payload) || !isPlainObject(fallbackSnapshot)) return null;
+
+  const fallbackTeachers = normalizeTeacherConfigsForSync(
+    fallbackSnapshot.teacherConfigs,
+    initialTeachers
+  );
+  const teacherConfigs = normalizeTeacherConfigsForSync(payload.teacherConfigs, fallbackTeachers);
+  const allSchedules = normalizeAllSchedulesForSync(
+    isPlainObject(payload.allSchedules) ? payload.allSchedules : fallbackSnapshot.allSchedules,
+    fallbackSnapshot.allSchedules
+  );
+  const standardHours = normalizeStandardHoursForSync(payload.standardHours, fallbackSnapshot.standardHours);
+  const specialTemplates = normalizeSpecialTemplates(
+    teacherConfigs,
+    isPlainObject(payload.specialTemplates) ? payload.specialTemplates : fallbackSnapshot.specialTemplates
+  );
+
+  return {
+    allSchedules,
+    standardHours,
+    teacherConfigs,
+    specialTemplates
+  };
+};
+
+const hasRemoteSchedulePayload = (payload) =>
+  isPlainObject(payload?.allSchedules) && Object.keys(payload.allSchedules).length > 0;
+
 const SHARED_STATE_ROW_ID = 'main';
 const SYNC_DEBOUNCE_MS = 1200;
-
-const isValidSharedPayload = (payload) => {
-  if (!payload || typeof payload !== 'object') return false;
-  if (!payload.allSchedules || typeof payload.allSchedules !== 'object') return false;
-  if (!payload.standardHours || typeof payload.standardHours !== 'object') return false;
-  if (!Array.isArray(payload.teacherConfigs)) return false;
-  if (payload.specialTemplates !== undefined && (!payload.specialTemplates || typeof payload.specialTemplates !== 'object')) return false;
-  return true;
-};
 
 // --- [4] 메인 컴포넌트 ---
 export default function TimetableApp() {
@@ -311,7 +430,7 @@ export default function TimetableApp() {
   const [compactTextScalePercent, setCompactTextScalePercent] = useState(100);
   const [monthlyTextScalePercent, setMonthlyTextScalePercent] = useState(100);
   const [holidayWeekIndex, setHolidayWeekIndex] = useState(0);
-  const [holidayDayIndex, setHolidayDayIndex] = useState(0);
+  const [holidayDayIndices, setHolidayDayIndices] = useState([0]);
   const [isTopHeaderHidden, setIsTopHeaderHidden] = useState(false);
   const [isSpacePanMode, setIsSpacePanMode] = useState(false);
   const [cellSubjectContextMenu, setCellSubjectContextMenu] = useState(null);
@@ -344,7 +463,17 @@ export default function TimetableApp() {
   
   const currentWeekName = WEEKS[currentWeekIndex];
   const holidayTargetWeekName = WEEKS[holidayWeekIndex] || WEEKS[0];
-  const holidayTargetDayLabel = getDatesForWeek(holidayTargetWeekName)?.[holidayDayIndex] || DAYS[holidayDayIndex];
+  const selectedHolidayDayIndices = useMemo(() => {
+    const normalized = [...new Set(
+      (holidayDayIndices || [])
+        .map((idx) => Number(idx))
+        .filter((idx) => Number.isInteger(idx) && idx >= 0 && idx < DAYS.length)
+    )].sort((a, b) => a - b);
+    return normalized.length > 0 ? normalized : [0];
+  }, [holidayDayIndices]);
+  const holidayTargetDayLabels = selectedHolidayDayIndices
+    .map((idx) => getDatesForWeek(holidayTargetWeekName)?.[idx] || DAYS[idx])
+    .join(', ');
   const contextViewportWidth = typeof window !== 'undefined' ? window.innerWidth : 1280;
   const contextViewportHeight = typeof window !== 'undefined' ? window.innerHeight : 720;
   const contextMenuLeft = cellSubjectContextMenu
@@ -365,6 +494,7 @@ export default function TimetableApp() {
   const isWeeklyAllView = viewMode === 'weekly' && weeklyLayoutMode === 'all';
   const isMonthlyClassWeeklyView = viewMode === 'monthly' && monthlyLayoutMode === 'class_weekly';
   const isWideContentMode = isWeeklyAllView || isMonthlyClassWeeklyView;
+  const isSelectedHolidayCell = isHolidayCell(selectedCell);
   const selectedSubjectOptionValue = selectedCell ? getSubjectSelectionValueForCell(selectedCell) : '';
   const hasTeacherHighlightFilter = highlightTeacherIds.length > 0;
   const templateExpectationMap = useMemo(() => {
@@ -732,28 +862,37 @@ export default function TimetableApp() {
     if (!isSupabaseConfigured || !supabase) return undefined;
 
     let isMounted = true;
+    let retryTimer = null;
 
-    const applyRemotePayload = (payload, syncedAt) => {
-      if (!isValidSharedPayload(payload)) return;
+    const getFallbackSnapshot = () => ({
+      allSchedules,
+      standardHours,
+      teacherConfigs,
+      specialTemplates: normalizeSpecialTemplates(teacherConfigs, specialTemplates)
+    });
 
-      const normalizedRemoteTemplates = normalizeSpecialTemplates(
-        payload.teacherConfigs,
-        payload.specialTemplates || {}
-      );
+    const applyRemotePayload = (payload, syncedAt, fallbackSnapshot = getFallbackSnapshot()) => {
+      const normalizedPayload = normalizePayloadForSync(payload, fallbackSnapshot);
+      if (!normalizedPayload) return false;
+
+      const payloadForSync = {
+        allSchedules: normalizedPayload.allSchedules,
+        standardHours: normalizedPayload.standardHours,
+        teacherConfigs: normalizedPayload.teacherConfigs,
+        specialTemplates: normalizedPayload.specialTemplates
+      };
 
       isApplyingRemoteRef.current = true;
-      setAllSchedules(payload.allSchedules);
-      setStandardHours(payload.standardHours);
-      setTeacherConfigs(payload.teacherConfigs);
-      setSpecialTemplates(normalizedRemoteTemplates);
-      lastSyncedPayloadRef.current = JSON.stringify({
-        ...payload,
-        specialTemplates: normalizedRemoteTemplates
-      });
+      setAllSchedules(payloadForSync.allSchedules);
+      setStandardHours(payloadForSync.standardHours);
+      setTeacherConfigs(payloadForSync.teacherConfigs);
+      setSpecialTemplates(payloadForSync.specialTemplates);
+      lastSyncedPayloadRef.current = JSON.stringify(payloadForSync);
       setLastSyncedAt(syncedAt || new Date().toISOString());
       setTimeout(() => {
         isApplyingRemoteRef.current = false;
       }, 0);
+      return true;
     };
 
     const ensureInitialState = async () => {
@@ -766,16 +905,32 @@ export default function TimetableApp() {
       if (!isMounted) return;
 
       if (error) {
-        setSyncStatus('동기화 오류 (초기 조회 실패)');
+        setSyncStatus('동기화 오류 (초기 조회 실패, 재시도 중)');
+        isRemoteReadyRef.current = false;
+        retryTimer = setTimeout(() => {
+          if (isMounted) ensureInitialState();
+        }, 5000);
+        return;
+      }
+
+      const fallbackSnapshot = getFallbackSnapshot();
+      const remotePayload = data?.payload;
+      const isRemotePayloadEmpty = isPlainObject(remotePayload) && Object.keys(remotePayload).length === 0;
+
+      if (hasRemoteSchedulePayload(remotePayload)) {
+        const applied = applyRemotePayload(remotePayload, data.updated_at, fallbackSnapshot);
+        if (!applied) {
+          setSyncStatus('동기화 보류 (원격 데이터 형식 확인 필요)');
+          isRemoteReadyRef.current = false;
+          return;
+        }
+        setSyncStatus('실시간 동기화 연결됨');
         isRemoteReadyRef.current = true;
         return;
       }
 
-      if (data?.payload && isValidSharedPayload(data.payload)) {
-        applyRemotePayload(data.payload, data.updated_at);
-        setSyncStatus('실시간 동기화 연결됨');
-      } else {
-        const initialPayload = { allSchedules, standardHours, teacherConfigs, specialTemplates };
+      if (!data || isRemotePayloadEmpty) {
+        const initialPayload = fallbackSnapshot;
         const payloadText = JSON.stringify(initialPayload);
         const { error: upsertError } = await supabase.from('timetable_state').upsert(
           { id: SHARED_STATE_ROW_ID, payload: initialPayload, updated_by: clientIdRef.current },
@@ -785,15 +940,22 @@ export default function TimetableApp() {
         if (!isMounted) return;
 
         if (upsertError) {
-          setSyncStatus('동기화 오류 (초기 저장 실패)');
+          setSyncStatus('동기화 오류 (초기 저장 실패, 재시도 중)');
+          isRemoteReadyRef.current = false;
+          retryTimer = setTimeout(() => {
+            if (isMounted) ensureInitialState();
+          }, 5000);
         } else {
           lastSyncedPayloadRef.current = payloadText;
           setLastSyncedAt(new Date().toISOString());
           setSyncStatus('실시간 동기화 연결됨');
+          isRemoteReadyRef.current = true;
         }
+        return;
       }
 
-      isRemoteReadyRef.current = true;
+      setSyncStatus('동기화 보류 (원격 데이터 형식 확인 필요)');
+      isRemoteReadyRef.current = false;
     };
 
     ensureInitialState();
@@ -811,9 +973,11 @@ export default function TimetableApp() {
         (payload) => {
           if (!isMounted) return;
           if (payload.new?.updated_by === clientIdRef.current) return;
-          if (!isValidSharedPayload(payload.new?.payload)) return;
+          if (!hasRemoteSchedulePayload(payload.new?.payload)) return;
 
-          applyRemotePayload(payload.new.payload, payload.new.updated_at);
+          const applied = applyRemotePayload(payload.new.payload, payload.new.updated_at);
+          if (!applied) return;
+          isRemoteReadyRef.current = true;
           setSyncStatus('원격 변경 반영됨');
         }
       )
@@ -826,6 +990,7 @@ export default function TimetableApp() {
 
     return () => {
       isMounted = false;
+      if (retryTimer) clearTimeout(retryTimer);
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
       supabase.removeChannel(channel);
     };
@@ -895,6 +1060,10 @@ export default function TimetableApp() {
 
     const cell = allSchedules?.[weekName]?.[className]?.[p]?.[d];
     if (!cell) return;
+    if (isHolidayCell(cell)) {
+      showNotification('휴업일 칸은 설정의 휴업일 해제를 통해서만 수정할 수 있습니다.', 'error');
+      return;
+    }
 
     setCurrentClass(className);
     setCellSubjectContextMenu({
@@ -963,6 +1132,13 @@ export default function TimetableApp() {
     if (!selectedCell) {
       setSelectedCell({ weekName: wName, className: cName, p, d, ...clickedCell });
     } else {
+      const sourceCellCurrent = allSchedules[selectedCell.weekName][selectedCell.className][selectedCell.p][selectedCell.d];
+      if (isHolidayCell(sourceCellCurrent) || isHolidayCell(clickedCell)) {
+        showNotification('휴업일 칸은 수업 교환 대상이 아닙니다. 설정에서 휴업일 해제 후 수정하세요.', 'error');
+        setSelectedCell(null);
+        return;
+      }
+
       const validation = isSwapValid(selectedCell, wName, cName, p, d);
       
       const newAllSchedules = { ...allSchedules };
@@ -1005,6 +1181,12 @@ export default function TimetableApp() {
     if (!currentCell) return;
 
     const { subject: newSubject, forceHomeroom } = parseSubjectSelection(newSubjectSelection);
+
+    if (isHolidayCell(currentCell) && newSubject !== '휴업일') {
+      showNotification('휴업일 칸은 설정에서 휴업일 해제 후 수정할 수 있습니다.', 'error');
+      return;
+    }
+
     const newAllSchedules = { ...allSchedules };
 
     newAllSchedules[weekName] = { ...newAllSchedules[weekName] };
@@ -1082,6 +1264,10 @@ export default function TimetableApp() {
 
   const handleLocationChange = (newLocation) => {
     if (!selectedCell) return; // 모든 교과에서 비고/장소 입력 가능
+    if (isHolidayCell(selectedCell)) {
+      showNotification('휴업일 칸은 비고/장소를 수정할 수 없습니다.', 'error');
+      return;
+    }
     const newAllSchedules = { ...allSchedules };
     const { weekName, className, p, d } = selectedCell;
     
@@ -1128,7 +1314,36 @@ export default function TimetableApp() {
     };
   };
 
-  const applyHolidayToDay = (weekName, dayIndex) => {
+  const normalizeHolidayDaySelection = (dayIndices = []) =>
+    [...new Set(
+      (dayIndices || [])
+        .map((idx) => Number(idx))
+        .filter((idx) => Number.isInteger(idx) && idx >= 0 && idx < DAYS.length)
+    )].sort((a, b) => a - b);
+
+  const formatHolidayDayLabels = (weekName, dayIndices) =>
+    dayIndices
+      .map((idx) => getDatesForWeek(weekName)?.[idx] || DAYS[idx])
+      .join(', ');
+
+  const toggleHolidayDaySelection = (dayIndex) => {
+    setHolidayDayIndices((prev) => {
+      const normalized = normalizeHolidayDaySelection(prev);
+      if (normalized.includes(dayIndex)) {
+        const next = normalized.filter((idx) => idx !== dayIndex);
+        return next.length > 0 ? next : normalized;
+      }
+      return [...normalized, dayIndex].sort((a, b) => a - b);
+    });
+  };
+
+  const applyHolidayToDays = (weekName, dayIndices) => {
+    const validDayIndices = normalizeHolidayDaySelection(dayIndices);
+    if (validDayIndices.length === 0) {
+      showNotification('휴업일로 지정할 요일을 선택해주세요.', 'error');
+      return;
+    }
+
     const sourceWeek = allSchedules[weekName];
     if (!sourceWeek) {
       showNotification('선택한 주차 정보를 찾을 수 없습니다.', 'error');
@@ -1141,24 +1356,35 @@ export default function TimetableApp() {
       const classRows = sourceWeek[className];
       nextAllSchedules[weekName][className] = classRows.map((row, periodIndex) => {
         const copiedRow = [...row];
-        copiedRow[dayIndex] = {
-          subject: '휴업일',
-          type: 'holiday',
-          teacherId: null,
-          teacher: '',
-          location: '',
-          id: `${className}-${periodIndex}-${dayIndex}-holiday`
-        };
+        validDayIndices.forEach((dayIndex) => {
+          copiedRow[dayIndex] = {
+            subject: '휴업일',
+            type: 'holiday',
+            teacherId: null,
+            teacher: '',
+            location: '',
+            id: `${className}-${periodIndex}-${dayIndex}-holiday`
+          };
+        });
         return copiedRow;
       });
     });
 
     setAllSchedules(nextAllSchedules);
     setSelectedCell(null);
-    showNotification(`[${weekName}] ${getDatesForWeek(weekName)[dayIndex]} 전체 학급을 휴업일로 지정했습니다.`, 'success');
+    showNotification(
+      `[${weekName}] ${formatHolidayDayLabels(weekName, validDayIndices)} 전체 학급을 휴업일로 지정했습니다.`,
+      'success'
+    );
   };
 
-  const clearHolidayFromDay = (weekName, dayIndex) => {
+  const clearHolidayFromDays = (weekName, dayIndices) => {
+    const validDayIndices = normalizeHolidayDaySelection(dayIndices);
+    if (validDayIndices.length === 0) {
+      showNotification('휴업일 해제할 요일을 선택해주세요.', 'error');
+      return;
+    }
+
     const sourceWeek = allSchedules[weekName];
     if (!sourceWeek) {
       showNotification('선택한 주차 정보를 찾을 수 없습니다.', 'error');
@@ -1172,24 +1398,27 @@ export default function TimetableApp() {
       const classRows = sourceWeek[className];
       nextAllSchedules[weekName][className] = classRows.map((row, periodIndex) => {
         const copiedRow = [...row];
-        const cell = copiedRow[dayIndex];
-        const isHolidayCell = cell?.type === 'holiday' || cell?.subject === '휴업일';
-        if (!isHolidayCell) return copiedRow;
-
-        copiedRow[dayIndex] = createCellFromExpectationOrFallback(className, periodIndex, dayIndex);
-        restoredCount += 1;
+        validDayIndices.forEach((dayIndex) => {
+          const cell = copiedRow[dayIndex];
+          if (!isHolidayCell(cell)) return;
+          copiedRow[dayIndex] = createCellFromExpectationOrFallback(className, periodIndex, dayIndex);
+          restoredCount += 1;
+        });
         return copiedRow;
       });
     });
 
     if (restoredCount === 0) {
-      showNotification('선택한 요일에는 휴업일 지정 칸이 없습니다.', 'error');
+      showNotification('선택한 요일들에는 휴업일 지정 칸이 없습니다.', 'error');
       return;
     }
 
     setAllSchedules(nextAllSchedules);
     setSelectedCell(null);
-    showNotification(`[${weekName}] ${getDatesForWeek(weekName)[dayIndex]} 휴업일 지정을 해제했습니다.`, 'success');
+    showNotification(
+      `[${weekName}] ${formatHolidayDayLabels(weekName, validDayIndices)} 휴업일 지정을 해제했습니다.`,
+      'success'
+    );
   };
 
   const getCellStyles = (p, d, cell) => {
@@ -1230,6 +1459,15 @@ export default function TimetableApp() {
 
     if (!expected) {
       return actual.type === 'special';
+    }
+
+    // 과학/체육/음악은 담임 수업도 허용 (전담 템플릿과 과목만 동일하면 불일치 아님)
+    if (
+      actual.type === 'homeroom' &&
+      HOMEROOM_FLEX_SUBJECTS.includes(actual.subject || '') &&
+      expected.subject === (actual.subject || '')
+    ) {
+      return false;
     }
 
     if (actual.type !== 'special') return true;
@@ -1626,7 +1864,8 @@ export default function TimetableApp() {
               <select 
                 value={selectedSubjectOptionValue} 
                 onChange={(e) => handleDirectSubjectChange(e.target.value)}
-                className="border border-gray-300 p-2 rounded-md shadow-inner focus:outline-none focus:ring-2 focus:ring-yellow-500 bg-gray-50 font-bold text-gray-700"
+                disabled={isSelectedHolidayCell}
+                className="border border-gray-300 p-2 rounded-md shadow-inner focus:outline-none focus:ring-2 focus:ring-yellow-500 bg-gray-50 font-bold text-gray-700 disabled:bg-gray-100 disabled:text-gray-400"
               >
                 <option value="" disabled>-- 과목 선택 --</option>
                 {SUBJECT_SELECT_OPTIONS.map((opt) => (
@@ -1637,10 +1876,14 @@ export default function TimetableApp() {
 
               <button 
                 onClick={() => handleDirectSubjectChange('')} 
-                className="flex items-center gap-1 bg-red-50 text-red-600 px-3 py-2 rounded border border-red-200 hover:bg-red-100 font-bold text-sm transition"
+                disabled={isSelectedHolidayCell}
+                className="flex items-center gap-1 bg-red-50 text-red-600 px-3 py-2 rounded border border-red-200 hover:bg-red-100 font-bold text-sm transition disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <Trash2 size={16} /> 수업 삭제 (빈칸)
               </button>
+              {isSelectedHolidayCell && (
+                <span className="text-xs text-rose-500">휴업일 칸은 설정에서 휴업일 해제 후 수정할 수 있습니다.</span>
+              )}
             </div>
 
             <div className="flex items-center gap-2 ml-0 xl:ml-auto pt-4 xl:pt-0 border-t xl:border-t-0 border-gray-200 w-full xl:w-auto">
@@ -1651,7 +1894,8 @@ export default function TimetableApp() {
                 value={selectedCell.location || ''} 
                 onChange={(e) => handleLocationChange(e.target.value)}
                 placeholder="비고나 장소 입력"
-                className="border border-gray-300 p-2 rounded-md shadow-inner focus:outline-none focus:ring-2 focus:ring-blue-500 w-48 md:w-64 text-sm"
+                disabled={isSelectedHolidayCell}
+                className="border border-gray-300 p-2 rounded-md shadow-inner focus:outline-none focus:ring-2 focus:ring-blue-500 w-48 md:w-64 text-sm disabled:bg-gray-100 disabled:text-gray-400"
               />
             </div>
             
@@ -2204,16 +2448,16 @@ export default function TimetableApp() {
                 </div>
 
                 <div className="lg:col-span-2">
-                  <label className="block text-xs font-bold text-gray-500 mb-1">요일 선택</label>
+                  <label className="block text-xs font-bold text-gray-500 mb-1">요일 선택 (복수 선택 가능)</label>
                   <div className="flex flex-wrap gap-2">
                     {DAYS.map((day, dIdx) => {
                       const label = getDatesForWeek(holidayTargetWeekName)?.[dIdx] || day;
-                      const isSelected = holidayDayIndex === dIdx;
+                      const isSelected = selectedHolidayDayIndices.includes(dIdx);
                       return (
                         <button
                           key={`holiday-day-${day}`}
                           type="button"
-                          onClick={() => setHolidayDayIndex(dIdx)}
+                          onClick={() => toggleHolidayDaySelection(dIdx)}
                           className={`px-3 py-1.5 rounded-md text-xs font-bold border transition-colors ${isSelected ? 'bg-slate-700 text-white border-slate-700' : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'}`}
                         >
                           {label}
@@ -2226,14 +2470,14 @@ export default function TimetableApp() {
 
               <div className="px-4 pb-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
                 <p className="text-xs text-slate-600">
-                  현재 선택: <span className="font-bold text-slate-800">{holidayTargetWeekName}</span> · <span className="font-bold text-slate-800">{holidayTargetDayLabel}</span>
+                  현재 선택: <span className="font-bold text-slate-800">{holidayTargetWeekName}</span> · <span className="font-bold text-slate-800">{holidayTargetDayLabels}</span>
                 </p>
                 <div className="flex flex-wrap gap-2">
                   <button
                     onClick={() => {
-                      const ok = window.confirm(`[${holidayTargetWeekName}] ${holidayTargetDayLabel}을(를) 전체 학급 휴업일로 지정할까요?`);
+                      const ok = window.confirm(`[${holidayTargetWeekName}] ${holidayTargetDayLabels}을(를) 전체 학급 휴업일로 지정할까요?`);
                       if (!ok) return;
-                      applyHolidayToDay(holidayTargetWeekName, holidayDayIndex);
+                      applyHolidayToDays(holidayTargetWeekName, selectedHolidayDayIndices);
                     }}
                     className="px-3 py-2 text-xs font-bold bg-slate-700 text-white rounded border border-slate-700 hover:bg-slate-800"
                   >
@@ -2241,9 +2485,9 @@ export default function TimetableApp() {
                   </button>
                   <button
                     onClick={() => {
-                      const ok = window.confirm(`[${holidayTargetWeekName}] ${holidayTargetDayLabel}의 휴업일 지정을 해제할까요?`);
+                      const ok = window.confirm(`[${holidayTargetWeekName}] ${holidayTargetDayLabels}의 휴업일 지정을 해제할까요?`);
                       if (!ok) return;
-                      clearHolidayFromDay(holidayTargetWeekName, holidayDayIndex);
+                      clearHolidayFromDays(holidayTargetWeekName, selectedHolidayDayIndices);
                     }}
                     className="px-3 py-2 text-xs font-bold bg-white text-slate-700 rounded border border-slate-300 hover:bg-slate-100"
                   >
