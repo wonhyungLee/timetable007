@@ -144,6 +144,10 @@ const isSpecialLikeCell = (cell) => {
   if (cell.teacherId) return true;
   return Boolean((cell.teacher || '').trim());
 };
+const toClassNumber = (className) => {
+  const parsed = Number(String(className || '').replace('반', ''));
+  return Number.isInteger(parsed) ? parsed : null;
+};
 
 const getTimetableCellColor = (cell) => {
   const subject = cell?.subject || '';
@@ -1122,12 +1126,48 @@ export default function TimetableApp() {
 
     const blockedByHoliday = isHolidayCell(sourceCell) || isHolidayCell(targetCell);
     const blockedByOccupied = !blockedByHoliday && isOccupiedLessonCell(targetCell);
+    const sourceTeacherId = sourceCell?.teacherId || null;
+    const sourceTeacher = sourceTeacherId
+      ? teacherConfigs.find((teacher) => teacher.id === sourceTeacherId)
+      : null;
+    const targetClassNum = toClassNumber(className);
+    const blockedByUnassignedClass =
+      !blockedByHoliday &&
+      !blockedByOccupied &&
+      Boolean(
+        sourceTeacher &&
+        Number.isInteger(targetClassNum) &&
+        !sourceTeacher.classes.includes(targetClassNum)
+      );
+    const blockedByTeacherConflict =
+      !blockedByHoliday &&
+      !blockedByOccupied &&
+      !blockedByUnassignedClass &&
+      Boolean(
+        sourceTeacherId &&
+        findTeacherOverlapClasses(
+          allSchedules,
+          weekName,
+          className,
+          periodIndex,
+          dayIndex,
+          sourceTeacherId
+        ).length > 0
+      );
 
     return {
       active: true,
       isSelectedTarget: false,
-      canSwap: !blockedByHoliday && !blockedByOccupied,
-      blockReason: blockedByHoliday ? 'holiday' : blockedByOccupied ? 'occupied' : ''
+      canSwap: !blockedByHoliday && !blockedByOccupied && !blockedByUnassignedClass && !blockedByTeacherConflict,
+      blockReason: blockedByHoliday
+        ? 'holiday'
+        : blockedByOccupied
+          ? 'occupied'
+          : blockedByUnassignedClass
+            ? 'outside_assignments'
+            : blockedByTeacherConflict
+              ? 'teacher_conflict'
+              : ''
     };
   };
 
@@ -1220,8 +1260,16 @@ export default function TimetableApp() {
         setSelectedCell(null);
         return;
       }
-      if (isSpecialLikeCell(sourceCellCurrent) && swapTargetState.active && !swapTargetState.canSwap && swapTargetState.blockReason === 'occupied') {
-        showNotification('전담 이동은 빈칸으로만 가능합니다. 이미 수업이 있는 칸은 검정 표시 영역입니다.', 'error');
+      if (isSpecialLikeCell(sourceCellCurrent) && swapTargetState.active && !swapTargetState.canSwap) {
+        if (swapTargetState.blockReason === 'occupied') {
+          showNotification('전담 이동은 빈칸으로만 가능합니다. 이미 수업이 있는 칸은 검정 표시 영역입니다.', 'error');
+        } else if (swapTargetState.blockReason === 'outside_assignments') {
+          showNotification('선택한 전담교사의 담당 학급이 아니어서 이동할 수 없습니다.', 'error');
+        } else if (swapTargetState.blockReason === 'teacher_conflict') {
+          showNotification('해당 시간에는 같은 전담교사가 다른 학급 수업 중이라 이동할 수 없습니다.', 'error');
+        } else if (swapTargetState.blockReason === 'holiday') {
+          showNotification('휴업일 칸은 수업 교환 대상이 아닙니다. 설정에서 휴업일 해제 후 수정하세요.', 'error');
+        }
         return;
       }
 
@@ -1542,6 +1590,18 @@ export default function TimetableApp() {
               <span className="text-[11px] font-bold text-white tracking-wide">사용중</span>
             </div>
           );
+        } else if (swapTargetState.blockReason === 'outside_assignments') {
+          overlay = (
+            <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20">
+              <span className="text-[10px] font-bold text-white tracking-wide">미담당</span>
+            </div>
+          );
+        } else if (swapTargetState.blockReason === 'teacher_conflict') {
+          overlay = (
+            <div className="absolute inset-0 bg-rose-700 bg-opacity-70 flex items-center justify-center z-20">
+              <span className="text-[10px] font-bold text-white tracking-wide">중복</span>
+            </div>
+          );
         } else {
           overlay = <div className="absolute inset-0 bg-red-500 bg-opacity-20 flex items-center justify-center z-20"><X className="text-red-600 w-8 h-8 opacity-70" /></div>;
         }
@@ -1606,6 +1666,10 @@ export default function TimetableApp() {
         baseStyle += 'opacity-60 cursor-not-allowed ';
         if (swapTargetState.blockReason === 'occupied') {
           overlay = <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20"><span className="text-[8px] font-bold text-white">사용중</span></div>;
+        } else if (swapTargetState.blockReason === 'outside_assignments') {
+          overlay = <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20"><span className="text-[8px] font-bold text-white">미담당</span></div>;
+        } else if (swapTargetState.blockReason === 'teacher_conflict') {
+          overlay = <div className="absolute inset-0 bg-rose-700 bg-opacity-70 flex items-center justify-center z-20"><span className="text-[8px] font-bold text-white">중복</span></div>;
         } else {
           overlay = <div className="absolute inset-0 bg-red-500/20 flex items-center justify-center z-20"><X className="text-red-600 w-4 h-4 opacity-70" /></div>;
         }
@@ -1744,6 +1808,18 @@ export default function TimetableApp() {
           overlay = (
             <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20">
               <span className={`${dense ? 'text-[7px]' : 'text-[10px]'} font-bold text-white`}>사용중</span>
+            </div>
+          );
+        } else if (swapTargetState.blockReason === 'outside_assignments') {
+          overlay = (
+            <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20">
+              <span className={`${dense ? 'text-[7px]' : 'text-[10px]'} font-bold text-white`}>미담당</span>
+            </div>
+          );
+        } else if (swapTargetState.blockReason === 'teacher_conflict') {
+          overlay = (
+            <div className="absolute inset-0 bg-rose-700 bg-opacity-70 flex items-center justify-center z-20">
+              <span className={`${dense ? 'text-[7px]' : 'text-[10px]'} font-bold text-white`}>중복</span>
             </div>
           );
         } else {
@@ -2005,6 +2081,8 @@ export default function TimetableApp() {
               <div className="flex flex-wrap items-center gap-2 text-xs">
                 <span className="px-2 py-1 rounded bg-sky-50 text-sky-700 border border-sky-200 font-semibold">파란 하이라이트: 교환 가능한 영역</span>
                 <span className="px-2 py-1 rounded bg-gray-900 text-white border border-gray-800 font-semibold">검정 오버레이: 이미 수업 있음(교환 불가)</span>
+                <span className="px-2 py-1 rounded bg-gray-900 text-white border border-gray-800 font-semibold">미담당 오버레이: 담당 학급 아님(교환 불가)</span>
+                <span className="px-2 py-1 rounded bg-rose-700 text-white border border-rose-800 font-semibold">중복 오버레이: 같은 전담교사 수업 중(교환 불가)</span>
                 <span className="px-2 py-1 rounded bg-red-50 text-red-700 border border-red-200 font-semibold">X 오버레이: 휴업일(교환 불가)</span>
               </div>
             )}
@@ -2295,6 +2373,10 @@ export default function TimetableApp() {
                                   cellClass += "opacity-60 cursor-not-allowed ";
                                   if (swapTargetState.blockReason === 'occupied') {
                                     overlay = <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20"><span className="text-[9px] font-bold text-white">사용중</span></div>;
+                                  } else if (swapTargetState.blockReason === 'outside_assignments') {
+                                    overlay = <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20"><span className="text-[9px] font-bold text-white">미담당</span></div>;
+                                  } else if (swapTargetState.blockReason === 'teacher_conflict') {
+                                    overlay = <div className="absolute inset-0 bg-rose-700 bg-opacity-70 flex items-center justify-center z-20"><span className="text-[9px] font-bold text-white">중복</span></div>;
                                   } else {
                                     overlay = <div className="absolute inset-0 bg-red-500 bg-opacity-20 flex items-center justify-center z-20"><X className="text-red-600 w-5 h-5 opacity-70" /></div>;
                                   }
