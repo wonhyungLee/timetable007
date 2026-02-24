@@ -132,21 +132,11 @@ const getSubjectColor = (subject) => {
 };
 
 const isHolidayCell = (cell) => cell?.type === 'holiday' || cell?.subject === '휴업일';
-const isOccupiedLessonCell = (cell) => {
-  if (!cell) return false;
-  if (isHolidayCell(cell)) return false;
-  if (cell.type === 'empty') return false;
-  return Boolean((cell.subject || '').trim());
-};
 const isSpecialLikeCell = (cell) => {
   if (!cell || isHolidayCell(cell)) return false;
   if (cell.type === 'special') return true;
   if (cell.teacherId) return true;
   return Boolean((cell.teacher || '').trim());
-};
-const toClassNumber = (className) => {
-  const parsed = Number(String(className || '').replace('반', ''));
-  return Number.isInteger(parsed) ? parsed : null;
 };
 
 const getTimetableCellColor = (cell) => {
@@ -1079,6 +1069,29 @@ export default function TimetableApp() {
     return `[안내] [${weekName}] ${DAYS[dayIndex]} ${PERIODS[periodIndex]}교시 ${className} 수업이 전담 템플릿과 달라 파란색 테두리로 표시됩니다.`;
   };
 
+  const getSpecialTemplateTargetClassName = (teacherId, periodIndex, dayIndex) => {
+    if (!teacherId) return '';
+    const template = normalizedSpecialTemplates?.[teacherId];
+    return template?.[periodIndex]?.[dayIndex]?.className || '';
+  };
+
+  const buildSpecialMoveGuideMessage = (sourceMeta, sourceCell, targetMeta) => {
+    const teacherName = sourceCell?.teacher || '전담교사';
+    const subjectName = sourceCell?.subject || '전담수업';
+    const expectedClassName = getSpecialTemplateTargetClassName(sourceCell?.teacherId, sourceMeta.p, sourceMeta.d);
+
+    const header = `전담 수업은 직접 이동할 수 없습니다.`;
+    const fromLine = `현재 선택: [${sourceMeta.weekName}] ${sourceMeta.className} ${DAYS[sourceMeta.d]}요일 ${PERIODS[sourceMeta.p]}교시 ${subjectName} (${teacherName})`;
+    const targetLine = `선택한 대상: [${targetMeta.weekName}] ${targetMeta.className} ${DAYS[targetMeta.d]}요일 ${PERIODS[targetMeta.p]}교시`;
+
+    if (expectedClassName) {
+      const guideLine = `템플릿 권장: ${expectedClassName} ${DAYS[sourceMeta.d]}요일 ${PERIODS[sourceMeta.p]}교시 ${subjectName}`;
+      return `${header}\n\n${fromLine}\n${targetLine}\n\n${guideLine}\n\n설정 > 전담 시간표 템플릿에서 수정 후 '전담 시간표 템플릿 배정'을 실행하세요.`;
+    }
+
+    return `${header}\n\n${fromLine}\n${targetLine}\n\n해당 시간의 템플릿 권장 학급이 없습니다.\n설정 > 전담 시간표 템플릿을 먼저 확인하세요.`;
+  };
+
   const getConflictBorderClassName = (hasTemplateMismatch, hasTeacherConflict) => {
     if (hasTeacherConflict) return 'border-red-500 border-2 ';
     if (hasTemplateMismatch) return 'border-blue-500 border-2 ';
@@ -1124,50 +1137,25 @@ export default function TimetableApp() {
       };
     }
 
+    const expectedClassName = getSpecialTemplateTargetClassName(sourceCell?.teacherId, selectedCell.p, selectedCell.d);
+    const isRecommendedTarget =
+      selectedCell.weekName === weekName &&
+      selectedCell.p === periodIndex &&
+      selectedCell.d === dayIndex &&
+      Boolean(expectedClassName) &&
+      className === expectedClassName;
+
     const blockedByHoliday = isHolidayCell(sourceCell) || isHolidayCell(targetCell);
-    const blockedByOccupied = !blockedByHoliday && isOccupiedLessonCell(targetCell);
-    const sourceTeacherId = sourceCell?.teacherId || null;
-    const sourceTeacher = sourceTeacherId
-      ? teacherConfigs.find((teacher) => teacher.id === sourceTeacherId)
-      : null;
-    const targetClassNum = toClassNumber(className);
-    const blockedByUnassignedClass =
-      !blockedByHoliday &&
-      !blockedByOccupied &&
-      Boolean(
-        sourceTeacher &&
-        Number.isInteger(targetClassNum) &&
-        !sourceTeacher.classes.includes(targetClassNum)
-      );
-    const blockedByTeacherConflict =
-      !blockedByHoliday &&
-      !blockedByOccupied &&
-      !blockedByUnassignedClass &&
-      Boolean(
-        sourceTeacherId &&
-        findTeacherOverlapClasses(
-          allSchedules,
-          weekName,
-          className,
-          periodIndex,
-          dayIndex,
-          sourceTeacherId
-        ).length > 0
-      );
 
     return {
       active: true,
       isSelectedTarget: false,
-      canSwap: !blockedByHoliday && !blockedByOccupied && !blockedByUnassignedClass && !blockedByTeacherConflict,
+      canSwap: false,
       blockReason: blockedByHoliday
         ? 'holiday'
-        : blockedByOccupied
-          ? 'occupied'
-          : blockedByUnassignedClass
-            ? 'outside_assignments'
-            : blockedByTeacherConflict
-              ? 'teacher_conflict'
-              : ''
+        : isRecommendedTarget
+          ? 'special_recommended_target'
+          : 'special_move_locked'
     };
   };
 
@@ -1254,22 +1242,30 @@ export default function TimetableApp() {
       setSelectedCell({ weekName: wName, className: cName, p, d, ...clickedCell });
     } else {
       const sourceCellCurrent = allSchedules[selectedCell.weekName][selectedCell.className][selectedCell.p][selectedCell.d];
-      const swapTargetState = getSwapTargetState(wName, cName, p, d, clickedCell);
+      if (isSpecialLikeCell(sourceCellCurrent)) {
+        window.alert(
+          buildSpecialMoveGuideMessage(
+            {
+              weekName: selectedCell.weekName,
+              className: selectedCell.className,
+              p: selectedCell.p,
+              d: selectedCell.d
+            },
+            sourceCellCurrent,
+            {
+              weekName: wName,
+              className: cName,
+              p,
+              d
+            }
+          )
+        );
+        return;
+      }
+
       if (isHolidayCell(sourceCellCurrent) || isHolidayCell(clickedCell)) {
         showNotification('휴업일 칸은 수업 교환 대상이 아닙니다. 설정에서 휴업일 해제 후 수정하세요.', 'error');
         setSelectedCell(null);
-        return;
-      }
-      if (isSpecialLikeCell(sourceCellCurrent) && swapTargetState.active && !swapTargetState.canSwap) {
-        if (swapTargetState.blockReason === 'occupied') {
-          showNotification('전담 이동은 빈칸으로만 가능합니다. 이미 수업이 있는 칸은 검정 표시 영역입니다.', 'error');
-        } else if (swapTargetState.blockReason === 'outside_assignments') {
-          showNotification('선택한 전담교사의 담당 학급이 아니어서 이동할 수 없습니다.', 'error');
-        } else if (swapTargetState.blockReason === 'teacher_conflict') {
-          showNotification('해당 시간에는 같은 전담교사가 다른 학급 수업 중이라 이동할 수 없습니다.', 'error');
-        } else if (swapTargetState.blockReason === 'holiday') {
-          showNotification('휴업일 칸은 수업 교환 대상이 아닙니다. 설정에서 휴업일 해제 후 수정하세요.', 'error');
-        }
         return;
       }
 
@@ -1583,34 +1579,26 @@ export default function TimetableApp() {
     let overlay = null;
     if (selectedCell && !isSelected) {
       if (swapTargetState.active && !swapTargetState.canSwap) {
-        baseStyle += "opacity-60 cursor-not-allowed ";
-        if (swapTargetState.blockReason === 'occupied') {
+        if (swapTargetState.blockReason === 'special_recommended_target') {
+          baseStyle += "ring-2 ring-inset ring-sky-500 bg-sky-100 ";
           overlay = (
-            <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20">
-              <span className="text-[11px] font-bold text-white tracking-wide">사용중</span>
+            <div className="absolute inset-0 bg-sky-500 bg-opacity-20 flex items-center justify-center z-20">
+              <span className="text-[11px] font-bold text-sky-900 tracking-wide">권장 대상</span>
             </div>
           );
-        } else if (swapTargetState.blockReason === 'outside_assignments') {
-          overlay = (
-            <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20">
-              <span className="text-[10px] font-bold text-white tracking-wide">미담당</span>
-            </div>
-          );
-        } else if (swapTargetState.blockReason === 'teacher_conflict') {
-          overlay = (
-            <div className="absolute inset-0 bg-rose-700 bg-opacity-70 flex items-center justify-center z-20">
-              <span className="text-[10px] font-bold text-white tracking-wide">중복</span>
-            </div>
-          );
-        } else {
+        } else if (swapTargetState.blockReason === 'holiday') {
+          baseStyle += "opacity-60 cursor-not-allowed ";
           overlay = <div className="absolute inset-0 bg-red-500 bg-opacity-20 flex items-center justify-center z-20"><X className="text-red-600 w-8 h-8 opacity-70" /></div>;
+        } else {
+          baseStyle += "opacity-60 cursor-not-allowed ";
+          overlay = (
+            <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20">
+              <span className="text-[11px] font-bold text-white tracking-wide">직접 이동 불가</span>
+            </div>
+          );
         }
       } else {
-        if (swapTargetState.active && swapTargetState.canSwap) {
-          baseStyle += "ring-2 ring-inset ring-sky-400 bg-sky-100 hover:ring-sky-600 ";
-        } else {
-          baseStyle += "hover:ring-2 hover:ring-blue-400 hover:scale-105 z-10 ";
-        }
+        baseStyle += "hover:ring-2 hover:ring-blue-400 hover:scale-105 z-10 ";
       }
     }
     return { style: baseStyle, overlay };
@@ -1663,22 +1651,18 @@ export default function TimetableApp() {
     let overlay = null;
     if (selectedCell && !isSelected) {
       if (swapTargetState.active && !swapTargetState.canSwap) {
-        baseStyle += 'opacity-60 cursor-not-allowed ';
-        if (swapTargetState.blockReason === 'occupied') {
-          overlay = <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20"><span className="text-[8px] font-bold text-white">사용중</span></div>;
-        } else if (swapTargetState.blockReason === 'outside_assignments') {
-          overlay = <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20"><span className="text-[8px] font-bold text-white">미담당</span></div>;
-        } else if (swapTargetState.blockReason === 'teacher_conflict') {
-          overlay = <div className="absolute inset-0 bg-rose-700 bg-opacity-70 flex items-center justify-center z-20"><span className="text-[8px] font-bold text-white">중복</span></div>;
-        } else {
+        if (swapTargetState.blockReason === 'special_recommended_target') {
+          baseStyle += 'ring-2 ring-inset ring-sky-500 bg-sky-100 ';
+          overlay = <div className="absolute inset-0 bg-sky-500 bg-opacity-20 flex items-center justify-center z-20"><span className="text-[8px] font-bold text-sky-900">권장</span></div>;
+        } else if (swapTargetState.blockReason === 'holiday') {
+          baseStyle += 'opacity-60 cursor-not-allowed ';
           overlay = <div className="absolute inset-0 bg-red-500/20 flex items-center justify-center z-20"><X className="text-red-600 w-4 h-4 opacity-70" /></div>;
+        } else {
+          baseStyle += 'opacity-60 cursor-not-allowed ';
+          overlay = <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20"><span className="text-[8px] font-bold text-white">이동불가</span></div>;
         }
       } else {
-        if (swapTargetState.active && swapTargetState.canSwap) {
-          baseStyle += 'ring-2 ring-inset ring-sky-400 bg-sky-100 hover:ring-sky-600 ';
-        } else {
-          baseStyle += 'hover:ring-2 hover:ring-blue-300 hover:scale-[1.02] ';
-        }
+        baseStyle += 'hover:ring-2 hover:ring-blue-300 hover:scale-[1.02] ';
       }
     }
 
@@ -1803,34 +1787,26 @@ export default function TimetableApp() {
     let overlay = null;
     if (selectedCell && !isSelected) {
       if (swapTargetState.active && !swapTargetState.canSwap) {
-        baseStyle += 'opacity-60 cursor-not-allowed ';
-        if (swapTargetState.blockReason === 'occupied') {
+        if (swapTargetState.blockReason === 'special_recommended_target') {
+          baseStyle += dense ? 'ring-1 ring-inset ring-sky-500 bg-sky-100 ' : 'ring-2 ring-inset ring-sky-500 bg-sky-100 ';
           overlay = (
-            <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20">
-              <span className={`${dense ? 'text-[7px]' : 'text-[10px]'} font-bold text-white`}>사용중</span>
+            <div className="absolute inset-0 bg-sky-500 bg-opacity-20 flex items-center justify-center z-20">
+              <span className={`${dense ? 'text-[7px]' : 'text-[10px]'} font-bold text-sky-900`}>권장</span>
             </div>
           );
-        } else if (swapTargetState.blockReason === 'outside_assignments') {
-          overlay = (
-            <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20">
-              <span className={`${dense ? 'text-[7px]' : 'text-[10px]'} font-bold text-white`}>미담당</span>
-            </div>
-          );
-        } else if (swapTargetState.blockReason === 'teacher_conflict') {
-          overlay = (
-            <div className="absolute inset-0 bg-rose-700 bg-opacity-70 flex items-center justify-center z-20">
-              <span className={`${dense ? 'text-[7px]' : 'text-[10px]'} font-bold text-white`}>중복</span>
-            </div>
-          );
-        } else {
+        } else if (swapTargetState.blockReason === 'holiday') {
+          baseStyle += 'opacity-60 cursor-not-allowed ';
           overlay = <div className="absolute inset-0 bg-red-500/20 flex items-center justify-center z-20"><X className={`text-red-600 ${dense ? 'w-3 h-3' : 'w-4 h-4'} opacity-70`} /></div>;
+        } else {
+          baseStyle += 'opacity-60 cursor-not-allowed ';
+          overlay = (
+            <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20">
+              <span className={`${dense ? 'text-[7px]' : 'text-[10px]'} font-bold text-white`}>이동불가</span>
+            </div>
+          );
         }
       } else {
-        if (swapTargetState.active && swapTargetState.canSwap) {
-          baseStyle += dense ? 'ring-1 ring-inset ring-sky-400 bg-sky-100 hover:ring-sky-600 ' : 'ring-2 ring-inset ring-sky-400 bg-sky-100 hover:ring-sky-600 ';
-        } else {
-          baseStyle += dense ? 'hover:ring-1 hover:ring-blue-300 ' : 'hover:ring-2 hover:ring-blue-300 hover:scale-[1.01] ';
-        }
+        baseStyle += dense ? 'hover:ring-1 hover:ring-blue-300 ' : 'hover:ring-2 hover:ring-blue-300 hover:scale-[1.01] ';
       }
     }
 
@@ -2079,11 +2055,10 @@ export default function TimetableApp() {
 
             {isSpecialSelectionForSwapHint && (
               <div className="flex flex-wrap items-center gap-2 text-xs">
-                <span className="px-2 py-1 rounded bg-sky-50 text-sky-700 border border-sky-200 font-semibold">파란 하이라이트: 교환 가능한 영역</span>
-                <span className="px-2 py-1 rounded bg-gray-900 text-white border border-gray-800 font-semibold">검정 오버레이: 이미 수업 있음(교환 불가)</span>
-                <span className="px-2 py-1 rounded bg-gray-900 text-white border border-gray-800 font-semibold">미담당 오버레이: 담당 학급 아님(교환 불가)</span>
-                <span className="px-2 py-1 rounded bg-rose-700 text-white border border-rose-800 font-semibold">중복 오버레이: 같은 전담교사 수업 중(교환 불가)</span>
-                <span className="px-2 py-1 rounded bg-red-50 text-red-700 border border-red-200 font-semibold">X 오버레이: 휴업일(교환 불가)</span>
+                <span className="px-2 py-1 rounded bg-sky-50 text-sky-700 border border-sky-200 font-semibold">파란 표시: 템플릿 권장 대상</span>
+                <span className="px-2 py-1 rounded bg-gray-900 text-white border border-gray-800 font-semibold">검정 오버레이: 전담 직접 이동 불가</span>
+                <span className="px-2 py-1 rounded bg-red-50 text-red-700 border border-red-200 font-semibold">X 오버레이: 휴업일(이동 불가)</span>
+                <span className="px-2 py-1 rounded bg-indigo-50 text-indigo-700 border border-indigo-200 font-semibold">다른 칸 클릭 시 이동 안내 팝업 표시</span>
               </div>
             )}
 
@@ -2370,22 +2345,18 @@ export default function TimetableApp() {
                               let overlay = null;
                               if (selectedCell && !isSelected) {
                                 if (swapTargetState.active && !swapTargetState.canSwap) {
-                                  cellClass += "opacity-60 cursor-not-allowed ";
-                                  if (swapTargetState.blockReason === 'occupied') {
-                                    overlay = <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20"><span className="text-[9px] font-bold text-white">사용중</span></div>;
-                                  } else if (swapTargetState.blockReason === 'outside_assignments') {
-                                    overlay = <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20"><span className="text-[9px] font-bold text-white">미담당</span></div>;
-                                  } else if (swapTargetState.blockReason === 'teacher_conflict') {
-                                    overlay = <div className="absolute inset-0 bg-rose-700 bg-opacity-70 flex items-center justify-center z-20"><span className="text-[9px] font-bold text-white">중복</span></div>;
-                                  } else {
+                                  if (swapTargetState.blockReason === 'special_recommended_target') {
+                                    cellClass += "ring-2 ring-inset ring-sky-500 bg-sky-100 ";
+                                    overlay = <div className="absolute inset-0 bg-sky-500 bg-opacity-20 flex items-center justify-center z-20"><span className="text-[9px] font-bold text-sky-900">권장</span></div>;
+                                  } else if (swapTargetState.blockReason === 'holiday') {
+                                    cellClass += "opacity-60 cursor-not-allowed ";
                                     overlay = <div className="absolute inset-0 bg-red-500 bg-opacity-20 flex items-center justify-center z-20"><X className="text-red-600 w-5 h-5 opacity-70" /></div>;
+                                  } else {
+                                    cellClass += "opacity-60 cursor-not-allowed ";
+                                    overlay = <div className="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center z-20"><span className="text-[9px] font-bold text-white">이동불가</span></div>;
                                   }
                                 } else {
-                                  if (swapTargetState.active && swapTargetState.canSwap) {
-                                    cellClass += "ring-2 ring-inset ring-sky-400 bg-sky-100 hover:ring-sky-600 ";
-                                  } else {
-                                    cellClass += "hover:ring-2 hover:ring-blue-400 hover:scale-105 z-10 ";
-                                  }
+                                  cellClass += "hover:ring-2 hover:ring-blue-400 hover:scale-105 z-10 ";
                                 }
                               }
                               
