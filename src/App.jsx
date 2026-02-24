@@ -28,6 +28,14 @@ const parseSubjectSelection = (value) => {
   return { subject: value, forceHomeroom: false };
 };
 
+const getSubjectSelectionValueForCell = (cell) => {
+  if (!cell) return '';
+  if (cell.type === 'homeroom' && HOMEROOM_FLEX_SUBJECTS.includes(cell.subject)) {
+    return toHomeroomOverrideValue(cell.subject);
+  }
+  return cell.subject || '';
+};
+
 const SUBJECT_SELECT_OPTIONS = ALL_SUBJECTS.flatMap((subject) => {
   if (!HOMEROOM_FLEX_SUBJECTS.includes(subject)) {
     return [{ value: subject, label: subject }];
@@ -298,6 +306,8 @@ export default function TimetableApp() {
   const [holidayDayIndex, setHolidayDayIndex] = useState(0);
   const [isTopHeaderHidden, setIsTopHeaderHidden] = useState(false);
   const [isSpacePanMode, setIsSpacePanMode] = useState(false);
+  const [cellSubjectContextMenu, setCellSubjectContextMenu] = useState(null);
+  const [contextMenuSubjectValue, setContextMenuSubjectValue] = useState('');
   const [currentWeekIndex, setCurrentWeekIndex] = useState(0);
   const [currentClass, setCurrentClass] = useState('1반');
   const [selectedCell, setSelectedCell] = useState(null);
@@ -322,10 +332,19 @@ export default function TimetableApp() {
   const saveTimerRef = useRef(null);
   const clientIdRef = useRef(`client-${Math.random().toString(36).slice(2, 10)}`);
   const panDragRef = useRef(null);
+  const contextMenuRef = useRef(null);
   
   const currentWeekName = WEEKS[currentWeekIndex];
   const holidayTargetWeekName = WEEKS[holidayWeekIndex] || WEEKS[0];
   const holidayTargetDayLabel = getDatesForWeek(holidayTargetWeekName)?.[holidayDayIndex] || DAYS[holidayDayIndex];
+  const contextViewportWidth = typeof window !== 'undefined' ? window.innerWidth : 1280;
+  const contextViewportHeight = typeof window !== 'undefined' ? window.innerHeight : 720;
+  const contextMenuLeft = cellSubjectContextMenu
+    ? Math.max(8, Math.min(cellSubjectContextMenu.x, contextViewportWidth - 280))
+    : 0;
+  const contextMenuTop = cellSubjectContextMenu
+    ? Math.max(8, Math.min(cellSubjectContextMenu.y, contextViewportHeight - 240))
+    : 0;
   const schedules = allSchedules[currentWeekName];
   const normalizedSpecialTemplates = useMemo(
     () => normalizeSpecialTemplates(teacherConfigs, specialTemplates),
@@ -338,13 +357,7 @@ export default function TimetableApp() {
   const isWeeklyAllView = viewMode === 'weekly' && weeklyLayoutMode === 'all';
   const isMonthlyClassWeeklyView = viewMode === 'monthly' && monthlyLayoutMode === 'class_weekly';
   const isWideContentMode = isWeeklyAllView || isMonthlyClassWeeklyView;
-  const selectedSubjectOptionValue = selectedCell
-    ? (
-      selectedCell.type === 'homeroom' && HOMEROOM_FLEX_SUBJECTS.includes(selectedCell.subject)
-        ? toHomeroomOverrideValue(selectedCell.subject)
-        : (selectedCell.subject || '')
-    )
-    : '';
+  const selectedSubjectOptionValue = selectedCell ? getSubjectSelectionValueForCell(selectedCell) : '';
   const hasTeacherHighlightFilter = highlightTeacherIds.length > 0;
   const templateExpectationMap = useMemo(() => {
     const map = {};
@@ -464,6 +477,32 @@ export default function TimetableApp() {
       window.removeEventListener('mouseup', handleMouseUp);
     };
   }, []);
+
+  useEffect(() => {
+    if (!cellSubjectContextMenu) return undefined;
+
+    const handleMouseDown = (e) => {
+      if (contextMenuRef.current && !contextMenuRef.current.contains(e.target)) {
+        closeCellSubjectContextMenu();
+      }
+    };
+
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') closeCellSubjectContextMenu();
+    };
+
+    const handleScroll = () => closeCellSubjectContextMenu();
+
+    window.addEventListener('mousedown', handleMouseDown);
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('scroll', handleScroll, true);
+
+    return () => {
+      window.removeEventListener('mousedown', handleMouseDown);
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('scroll', handleScroll, true);
+    };
+  }, [cellSubjectContextMenu]);
 
   const showNotification = (message, type = 'error') => setToast({ show: true, message, type });
   const teacherAssignableSubjects = ALL_SUBJECTS.filter(subject => subject !== '휴업일');
@@ -816,6 +855,56 @@ export default function TimetableApp() {
     };
   }, [allSchedules, standardHours, teacherConfigs, specialTemplates]);
 
+  const findTeacherOverlapClasses = (schedulesMap, weekName, className, periodIndex, dayIndex, teacherId) => {
+    if (!teacherId) return [];
+    const weekSchedule = schedulesMap?.[weekName];
+    if (!weekSchedule) return [];
+
+    return CLASSES.filter((cls) => {
+      if (cls === className) return false;
+      const targetCell = weekSchedule[cls]?.[periodIndex]?.[dayIndex];
+      return targetCell?.type === 'special' && targetCell.teacherId === teacherId;
+    });
+  };
+
+  const hasTeacherOverlapConflict = (weekName, className, periodIndex, dayIndex, cell, schedulesMap = allSchedules) => {
+    if (!cell || cell.type !== 'special' || !cell.teacherId) return false;
+    return findTeacherOverlapClasses(schedulesMap, weekName, className, periodIndex, dayIndex, cell.teacherId).length > 0;
+  };
+
+  const buildTeacherOverlapWarning = (weekName, className, periodIndex, dayIndex, cell, schedulesMap = allSchedules) => {
+    if (!cell || cell.type !== 'special' || !cell.teacherId) return '';
+    const overlapClasses = findTeacherOverlapClasses(schedulesMap, weekName, className, periodIndex, dayIndex, cell.teacherId);
+    if (overlapClasses.length === 0) return '';
+    const teacherName = cell.teacher || '전담 교사';
+    return `[경고] [${weekName}] ${DAYS[dayIndex]} ${PERIODS[periodIndex]}교시 ${className} 수업이 ${teacherName} 선생님 기준 ${overlapClasses.join(', ')}와 중복됩니다. (변경은 적용됨)`;
+  };
+
+  const openCellSubjectContextMenu = (e, weekName, className, p, d) => {
+    if (isSpacePanMode) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    const cell = allSchedules?.[weekName]?.[className]?.[p]?.[d];
+    if (!cell) return;
+
+    setCurrentClass(className);
+    setCellSubjectContextMenu({
+      weekName,
+      className,
+      p,
+      d,
+      x: e.clientX,
+      y: e.clientY
+    });
+    setContextMenuSubjectValue(getSubjectSelectionValueForCell(cell));
+  };
+
+  const closeCellSubjectContextMenu = () => {
+    setCellSubjectContextMenu(null);
+    setContextMenuSubjectValue('');
+  };
+
   // 충돌 검사 (선생님 기준)
   const isSwapValid = (sourceCell, targetWeek, targetClass, targetP, targetD) => {
     const targetCell = allSchedules[targetWeek][targetClass][targetP][targetD];
@@ -823,27 +912,36 @@ export default function TimetableApp() {
     const sourceClass = sourceCell.className;
     const sourceP = sourceCell.p;
     const sourceD = sourceCell.d;
+    const warnings = [];
 
     // 휴업일이나 빈칸은 충돌 검사 제외
     if (sourceCell.type !== 'homeroom' && sourceCell.type !== 'empty' && sourceCell.type !== 'holiday' && sourceCell.teacherId) {
+      const conflicts = [];
       for (const cls of CLASSES) {
         if (cls === targetClass) continue;
         if (sourceWeek === targetWeek && sourceP === targetP && sourceD === targetD && cls === sourceClass) continue;
         if (allSchedules[targetWeek][cls][targetP][targetD].teacherId === sourceCell.teacherId) {
-          return { valid: false, reason: `[${targetWeek}] ${sourceCell.teacher} 선생님이 ${cls} 수업 중입니다.` };
+          conflicts.push(cls);
         }
+      }
+      if (conflicts.length > 0) {
+        warnings.push(`[경고] ${sourceCell.teacher} 선생님이 [${targetWeek}] ${DAYS[targetD]} ${PERIODS[targetP]}교시에 ${conflicts.join(', ')}와 중복됩니다.`);
       }
     }
     if (targetCell.type !== 'homeroom' && targetCell.type !== 'empty' && targetCell.type !== 'holiday' && targetCell.teacherId) {
+      const conflicts = [];
       for (const cls of CLASSES) {
         if (cls === sourceClass) continue;
         if (sourceWeek === targetWeek && sourceP === targetP && sourceD === targetD && cls === targetClass) continue;
         if (allSchedules[sourceWeek][cls][sourceP][sourceD].teacherId === targetCell.teacherId) {
-          return { valid: false, reason: `[${sourceWeek}] ${targetCell.teacher} 선생님이 ${cls} 수업 중입니다.` };
+          conflicts.push(cls);
         }
       }
+      if (conflicts.length > 0) {
+        warnings.push(`[경고] ${targetCell.teacher} 선생님이 [${sourceWeek}] ${DAYS[sourceD]} ${PERIODS[sourceP]}교시에 ${conflicts.join(', ')}와 중복됩니다.`);
+      }
     }
-    return { valid: true };
+    return { valid: true, reason: warnings.join(' ') };
   };
 
   const handleUniversalCellClick = (wName, cName, p, d) => {
@@ -858,11 +956,6 @@ export default function TimetableApp() {
       setSelectedCell({ weekName: wName, className: cName, p, d, ...clickedCell });
     } else {
       const validation = isSwapValid(selectedCell, wName, cName, p, d);
-      if (!validation.valid) {
-        showNotification(validation.reason, 'error');
-        setSelectedCell(null);
-        return;
-      }
       
       const newAllSchedules = { ...allSchedules };
       const w1 = selectedCell.weekName; const c1 = selectedCell.className; const p1 = selectedCell.p; const d1 = selectedCell.d;
@@ -883,15 +976,27 @@ export default function TimetableApp() {
 
       setAllSchedules(newAllSchedules);
       setSelectedCell(null);
-      showNotification(`시간표가 성공적으로 변경되었습니다!`, 'success');
+
+      const warnings = [validation.reason];
+      const movedCellWarning = buildTeacherOverlapWarning(wName, cName, p, d, newAllSchedules[wName][cName][p][d], newAllSchedules);
+      const sourceCellWarning = buildTeacherOverlapWarning(w1, c1, p1, d1, newAllSchedules[w1][c1][p1][d1], newAllSchedules);
+      if (movedCellWarning) warnings.push(movedCellWarning);
+      if (sourceCellWarning) warnings.push(sourceCellWarning);
+      const warningMessage = [...new Set(warnings.filter(Boolean))].join(' ');
+
+      if (warningMessage) {
+        showNotification(warningMessage, 'error');
+      } else {
+        showNotification(`시간표가 성공적으로 변경되었습니다!`, 'success');
+      }
     }
   };
 
-  // 📝 리스트에서 과목 바로 변경 또는 삭제(빈칸) 처리
-  const handleDirectSubjectChange = (newSubjectSelection) => {
-    if (!selectedCell) return;
+  const applySubjectChangeToCell = (weekName, className, p, d, newSubjectSelection) => {
+    const currentCell = allSchedules?.[weekName]?.[className]?.[p]?.[d];
+    if (!currentCell) return;
+
     const { subject: newSubject, forceHomeroom } = parseSubjectSelection(newSubjectSelection);
-    const { weekName, className, p, d } = selectedCell;
     const newAllSchedules = { ...allSchedules };
 
     newAllSchedules[weekName] = { ...newAllSchedules[weekName] };
@@ -899,58 +1004,72 @@ export default function TimetableApp() {
     newAllSchedules[weekName][className][p] = [...newAllSchedules[weekName][className][p]];
 
     if (!newSubject) {
-      // 수업 삭제 (빈칸 처리)
       newAllSchedules[weekName][className][p][d] = { subject: '', type: 'empty', id: `${className}-${p}-${d}` };
-      showNotification('수업이 삭제되었습니다. (빈칸)', 'success');
-    } else {
-      // 과목 변경
-      let newType = 'homeroom';
-      let newTeacherId = null;
-      let newTeacherName = '';
-      let newLocation = '';
-
-      if (newSubject === '휴업일') {
-        newType = 'holiday';
-      } else if (!forceHomeroom) {
-        const classNum = parseInt(className.replace('반', ''));
-        const teacherObj = teacherConfigs.find(t => t.subject === newSubject && t.classes.includes(classNum));
-
-        if (teacherObj) {
-          newType = 'special';
-          newTeacherId = teacherObj.id;
-          newTeacherName = teacherObj.name;
-          newLocation = getDefaultLocation(newSubject, d, p);
-
-          // 선생님 충돌 사전 검사
-          for (const cls of CLASSES) {
-            if (cls === className) continue;
-            if (allSchedules[weekName][cls][p][d].teacherId === newTeacherId) {
-              showNotification(`[${weekName}] ${newTeacherName} 선생님이 이미 ${cls} 수업 중입니다! 변경 불가.`, 'error');
-              return;
-            }
-          }
-        }
+      setAllSchedules(newAllSchedules);
+      if (selectedCell && selectedCell.weekName === weekName && selectedCell.className === className && selectedCell.p === p && selectedCell.d === d) {
+        setSelectedCell({ weekName, className, p, d, ...newAllSchedules[weekName][className][p][d] });
       }
-
-      // 기존 비고/장소가 있다면 유지, 없으면 기본 장소 배정
-      const finalLocation = selectedCell.location ? selectedCell.location : newLocation;
-
-      newAllSchedules[weekName][className][p][d] = {
-        subject: newSubject,
-        type: newType,
-        teacherId: newTeacherId,
-        teacher: newTeacherName,
-        location: finalLocation,
-        id: `${className}-${p}-${d}`
-      };
-      showNotification(
-        `${newSubject}${forceHomeroom ? ' (담임)' : ''} 과목으로 변경되었습니다.`,
-        'success'
-      );
+      showNotification('수업이 삭제되었습니다. (빈칸)', 'success');
+      return;
     }
 
+    let newType = 'homeroom';
+    let newTeacherId = null;
+    let newTeacherName = '';
+    let newLocation = '';
+
+    if (newSubject === '휴업일') {
+      newType = 'holiday';
+    } else if (!forceHomeroom) {
+      const classNum = parseInt(className.replace('반', ''));
+      const teacherObj = teacherConfigs.find(t => t.subject === newSubject && t.classes.includes(classNum));
+      if (teacherObj) {
+        newType = 'special';
+        newTeacherId = teacherObj.id;
+        newTeacherName = teacherObj.name;
+        newLocation = getDefaultLocation(newSubject, d, p);
+      }
+    }
+
+    const finalLocation = currentCell.location ? currentCell.location : newLocation;
+
+    const nextCell = {
+      subject: newSubject,
+      type: newType,
+      teacherId: newTeacherId,
+      teacher: newTeacherName,
+      location: finalLocation,
+      id: `${className}-${p}-${d}`
+    };
+
+    newAllSchedules[weekName][className][p][d] = nextCell;
     setAllSchedules(newAllSchedules);
-    setSelectedCell({ weekName, className, p, d, ...newAllSchedules[weekName][className][p][d] });
+
+    if (selectedCell && selectedCell.weekName === weekName && selectedCell.className === className && selectedCell.p === p && selectedCell.d === d) {
+      setSelectedCell({ weekName, className, p, d, ...nextCell });
+    }
+
+    const warning = buildTeacherOverlapWarning(weekName, className, p, d, nextCell, newAllSchedules);
+    if (warning) {
+      showNotification(warning, 'error');
+      return;
+    }
+
+    showNotification(`${newSubject}${forceHomeroom ? ' (담임)' : ''} 과목으로 변경되었습니다.`, 'success');
+  };
+
+  // 📝 리스트에서 과목 바로 변경 또는 삭제(빈칸) 처리
+  const handleDirectSubjectChange = (newSubjectSelection) => {
+    if (!selectedCell) return;
+    const { weekName, className, p, d } = selectedCell;
+    applySubjectChangeToCell(weekName, className, p, d, newSubjectSelection);
+  };
+
+  const applyContextMenuSubjectChange = () => {
+    if (!cellSubjectContextMenu) return;
+    const { weekName, className, p, d } = cellSubjectContextMenu;
+    applySubjectChangeToCell(weekName, className, p, d, contextMenuSubjectValue);
+    closeCellSubjectContextMenu();
   };
 
   const handleLocationChange = (newLocation) => {
@@ -1067,11 +1186,12 @@ export default function TimetableApp() {
 
   const getCellStyles = (p, d, cell) => {
     const isSelected = selectedCell?.weekName === currentWeekName && selectedCell?.className === currentClass && selectedCell?.p === p && selectedCell?.d === d;
+    const hasTeacherConflict = hasTeacherOverlapConflict(currentWeekName, currentClass, p, d, cell);
     let baseStyle = "relative transition-all duration-200 ease-in-out border border-gray-300 p-2 h-24 flex flex-col items-center justify-center cursor-pointer font-medium text-lg rounded-sm ";
     
     baseStyle += getSubjectColor(cell.subject) + " ";
 
-    if (isCellMismatchedWithTemplate(currentClass, p, d, cell)) {
+    if (isCellMismatchedWithTemplate(currentClass, p, d, cell) || hasTeacherConflict) {
       baseStyle += "border-red-500 border-2 ";
     }
 
@@ -1117,10 +1237,11 @@ export default function TimetableApp() {
 
   const getCompactCellStyles = (className, p, d, cell) => {
     const isSelected = selectedCell?.weekName === currentWeekName && selectedCell?.className === className && selectedCell?.p === p && selectedCell?.d === d;
+    const hasTeacherConflict = hasTeacherOverlapConflict(currentWeekName, className, p, d, cell);
     let baseStyle = 'relative transition-all duration-150 ease-in-out border border-gray-300 p-1 h-[60px] flex flex-col items-center justify-center cursor-pointer rounded ';
     baseStyle += getSubjectColor(cell.subject) + ' ';
 
-    if (isCellMismatchedWithTemplate(className, p, d, cell)) {
+    if (isCellMismatchedWithTemplate(className, p, d, cell) || hasTeacherConflict) {
       baseStyle += 'border-red-500 border-2 ';
     }
 
@@ -1247,10 +1368,11 @@ export default function TimetableApp() {
 
   const getMonthlyClassCellStyles = (weekName, className, p, d, cell, dense = false) => {
     const isSelected = selectedCell?.weekName === weekName && selectedCell?.className === className && selectedCell?.p === p && selectedCell?.d === d;
+    const hasTeacherConflict = hasTeacherOverlapConflict(weekName, className, p, d, cell);
     let baseStyle = `relative transition-all duration-150 ease-in-out border border-gray-300 ${dense ? 'p-0.5 h-[52px] rounded-sm' : 'p-1 h-[78px] rounded'} flex flex-col items-center justify-center cursor-pointer `;
     baseStyle += getSubjectColor(cell.subject) + ' ';
 
-    if (isCellMismatchedWithTemplate(className, p, d, cell)) {
+    if (isCellMismatchedWithTemplate(className, p, d, cell) || hasTeacherConflict) {
       baseStyle += 'border-red-500 border-2 ';
     }
     if (isSelected) baseStyle += dense ? 'ring-1 ring-yellow-400 z-20 shadow ' : 'ring-2 ring-yellow-400 scale-[1.02] z-20 shadow ';
@@ -1539,6 +1661,46 @@ export default function TimetableApp() {
           </div>
         )}
 
+        {cellSubjectContextMenu && (
+          <div
+            ref={contextMenuRef}
+            className="fixed z-[70] w-72 bg-white border border-gray-300 rounded-xl shadow-xl p-3"
+            style={{ left: `${contextMenuLeft}px`, top: `${contextMenuTop}px` }}
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <p className="text-xs font-bold text-gray-700 mb-1">우클릭 과목 변경</p>
+            <p className="text-[11px] text-gray-500 mb-2">
+              [{cellSubjectContextMenu.weekName}] {cellSubjectContextMenu.className} · {DAYS[cellSubjectContextMenu.d]}요일 {PERIODS[cellSubjectContextMenu.p]}교시
+            </p>
+            <select
+              value={contextMenuSubjectValue}
+              onChange={(e) => setContextMenuSubjectValue(e.target.value)}
+              className="w-full border border-gray-300 rounded-md px-2 py-2 text-sm bg-gray-50 font-semibold text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-400"
+            >
+              <option value="">빈칸 (삭제)</option>
+              {SUBJECT_SELECT_OPTIONS.map((opt) => (
+                <option key={`context-${opt.value}`} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+            <div className="mt-3 flex gap-2 justify-end">
+              <button
+                type="button"
+                onClick={closeCellSubjectContextMenu}
+                className="px-2.5 py-1.5 text-xs font-bold bg-gray-100 text-gray-700 border border-gray-300 rounded hover:bg-gray-200"
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                onClick={applyContextMenuSubjectChange}
+                className="px-2.5 py-1.5 text-xs font-bold bg-blue-600 text-white border border-blue-600 rounded hover:bg-blue-700"
+              >
+                적용
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* ======================= VIEW RENDERING ======================= */}
         
         {viewMode === 'weekly' && weeklyLayoutMode === 'single' && (
@@ -1565,7 +1727,11 @@ export default function TimetableApp() {
                         const { style, overlay } = getCellStyles(pIndex, dIndex, cell);
                         return (
                           <td key={`${currentWeekName}-${pIndex}-${dIndex}`} className="p-1 align-middle">
-                            <div onClick={() => handleUniversalCellClick(currentWeekName, currentClass, pIndex, dIndex)} className={style}>
+                            <div
+                              onClick={() => handleUniversalCellClick(currentWeekName, currentClass, pIndex, dIndex)}
+                              onContextMenu={(e) => openCellSubjectContextMenu(e, currentWeekName, currentClass, pIndex, dIndex)}
+                              className={style}
+                            >
                               {cell.subject ? (
                                 <>
                                   <span className="relative z-10">{cell.subject === '휴업일' ? <span className="flex items-center gap-1"><Coffee size={16}/>휴업일</span> : cell.subject}</span>
@@ -1640,7 +1806,11 @@ export default function TimetableApp() {
                               const hasTeacherLine = cell.type === 'special' && Boolean(cell.teacher);
                               return (
                                 <td key={`${cls}-${pIndex}-${dIndex}`} className="p-0.5 align-middle">
-                                  <div onClick={() => { setCurrentClass(cls); handleUniversalCellClick(currentWeekName, cls, pIndex, dIndex); }} className={style}>
+                                  <div
+                                    onClick={() => { setCurrentClass(cls); handleUniversalCellClick(currentWeekName, cls, pIndex, dIndex); }}
+                                    onContextMenu={(e) => openCellSubjectContextMenu(e, currentWeekName, cls, pIndex, dIndex)}
+                                    className={style}
+                                  >
                                     <span className="leading-tight font-semibold text-gray-800" style={getCompactSubjectTextStyle(cell.subject || '-', hasTeacherLine)}>
                                       {cell.subject || '-'}
                                     </span>
@@ -1707,11 +1877,12 @@ export default function TimetableApp() {
                               const isHighlighted = hasTeacherHighlightFilter && cell.teacherId && highlightTeacherIds.includes(cell.teacherId);
                               const isDimmed = hasTeacherHighlightFilter && !isHighlighted;
                               const isTemplateMismatch = isCellMismatchedWithTemplate(cls, pIdx, dIdx, cell);
+                              const isTeacherConflict = hasTeacherOverlapConflict(weekName, cls, pIdx, dIdx, cell);
                               const isSelected = selectedCell?.weekName === weekName && selectedCell?.className === cls && selectedCell?.p === pIdx && selectedCell?.d === dIdx;
                               
                               let cellClass = `border border-gray-200 p-1 text-center h-14 relative cursor-pointer transition-all ${isDimmed ? 'opacity-20 grayscale ' : ''} ${isHighlighted ? 'ring-2 ring-inset ring-red-500 font-bold transform scale-105 z-10 shadow-md ' : ''}`;
                               cellClass += getSubjectColor(cell.subject) + " ";
-                              if (isTemplateMismatch) cellClass += "border-red-500 border-2 ";
+                              if (isTemplateMismatch || isTeacherConflict) cellClass += "border-red-500 border-2 ";
 
                               if (isSelected) cellClass += "ring-4 ring-yellow-400 transform scale-105 z-20 shadow-lg ";
 
@@ -1727,7 +1898,12 @@ export default function TimetableApp() {
                               }
                               
                               return (
-                                <td key={cls} className={cellClass} onClick={() => handleUniversalCellClick(weekName, cls, pIdx, dIdx)}>
+                                <td
+                                  key={cls}
+                                  className={cellClass}
+                                  onClick={() => handleUniversalCellClick(weekName, cls, pIdx, dIdx)}
+                                  onContextMenu={(e) => openCellSubjectContextMenu(e, weekName, cls, pIdx, dIdx)}
+                                >
                                   <div className="flex flex-col items-center justify-center h-full">
                                     <span className="font-semibold text-gray-800 leading-tight">{cell.subject === '휴업일' ? <Coffee size={14}/> : (cell.subject || '-')}</span>
                                     {isSpecial && !isDimmed && cell.teacher && <span className="text-[9px] text-gray-900 mt-0.5 leading-none">{cell.teacher}</span>}
@@ -1825,6 +2001,7 @@ export default function TimetableApp() {
                                           setCurrentClass(cls);
                                           handleUniversalCellClick(weekName, cls, pIdx, dIdx);
                                         }}
+                                        onContextMenu={(e) => openCellSubjectContextMenu(e, weekName, cls, pIdx, dIdx)}
                                         className={style}
                                       >
                                         <span className="leading-tight font-semibold text-gray-800 max-w-full px-0.5 text-center whitespace-normal break-all" style={getMonthlyClassSubjectTextStyle(cell.subject || '-', hasTeacherLine, true, denseFitScale)}>
