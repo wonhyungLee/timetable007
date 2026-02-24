@@ -1586,20 +1586,52 @@ export default function TimetableApp() {
 
   // 📝 이후 주차 덮어쓰기 로직 고도화 (현재 반만 덮어쓰기, 강력한 경고창 적용)
   const applyToFutureWeeks = () => {
-    const msg = `현재 [${currentWeekName}]의 '${currentClass}' 시간표를 이후 모든 주차에 덮어쓰시겠습니까?\n\n⚠️ 주의: 이후 주차에 이미 작성해둔 '${currentClass}'의 시간표 내용이 있다면 모두 지워지고 현재 시간표로 덮어씌워집니다.`;
+    const msg = `현재 [${currentWeekName}]의 '${currentClass}' 시간표를 이후 모든 주차에 덮어쓰시겠습니까?\n\n⚠️ 주의: 이후 주차에 이미 작성해둔 '${currentClass}'의 시간표 내용이 덮어씌워지며, 휴업일 칸은 유지됩니다.`;
       
     if (!window.confirm(msg)) return;
     
     const newAllSchedules = { ...allSchedules };
-    const classTemplate = JSON.stringify(newAllSchedules[currentWeekName][currentClass]);
+    const sourceClassRows = newAllSchedules[currentWeekName]?.[currentClass];
+    if (!sourceClassRows) {
+      showNotification('현재 주차 학급 시간표를 찾을 수 없습니다.', 'error');
+      return;
+    }
+
+    let preservedHolidaySlots = 0;
     
     for (let i = currentWeekIndex + 1; i < WEEKS.length; i++) {
-      newAllSchedules[WEEKS[i]] = { ...newAllSchedules[WEEKS[i]] };
-      newAllSchedules[WEEKS[i]][currentClass] = JSON.parse(classTemplate);
+      const weekName = WEEKS[i];
+      const weekSchedule = newAllSchedules[weekName];
+      if (!weekSchedule?.[currentClass]) continue;
+
+      newAllSchedules[weekName] = { ...weekSchedule };
+      const targetClassRows = weekSchedule[currentClass];
+
+      const mergedRows = targetClassRows.map((targetRow, pIdx) =>
+        targetRow.map((targetCell, dIdx) => {
+          const sourceCell = sourceClassRows?.[pIdx]?.[dIdx];
+          if (!sourceCell) return { ...targetCell };
+
+          // 휴업일은 덮어쓰기 대상에서 제외한다.
+          if (isHolidayCell(targetCell) || isHolidayCell(sourceCell)) {
+            preservedHolidaySlots += 1;
+            return { ...targetCell };
+          }
+
+          return { ...sourceCell };
+        })
+      );
+
+      newAllSchedules[weekName][currentClass] = mergedRows;
     }
     
     setAllSchedules(newAllSchedules);
-    showNotification(`이후 모든 주차에 성공적으로 반영되었습니다.`, 'success');
+    showNotification(
+      preservedHolidaySlots > 0
+        ? `이후 모든 주차에 반영되었습니다. (휴업일 ${preservedHolidaySlots}칸은 유지)`
+        : '이후 모든 주차에 성공적으로 반영되었습니다.',
+      'success'
+    );
   };
 
   const createCellFromExpectationOrFallback = (className, periodIndex, dayIndex) => {
