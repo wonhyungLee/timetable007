@@ -132,6 +132,12 @@ const getSubjectColor = (subject) => {
 };
 
 const isHolidayCell = (cell) => cell?.type === 'holiday' || cell?.subject === '휴업일';
+const isOccupiedLessonCell = (cell) => {
+  if (!cell) return false;
+  if (isHolidayCell(cell)) return false;
+  if (cell.type === 'empty') return false;
+  return Boolean((cell.subject || '').trim());
+};
 
 const getTimetableCellColor = (cell) => {
   const subject = cell?.subject || '';
@@ -1074,7 +1080,8 @@ export default function TimetableApp() {
       return {
         active: false,
         isSelectedTarget: false,
-        canSwap: true
+        canSwap: true,
+        blockReason: ''
       };
     }
 
@@ -1088,7 +1095,8 @@ export default function TimetableApp() {
       return {
         active: false,
         isSelectedTarget: true,
-        canSwap: true
+        canSwap: true,
+        blockReason: ''
       };
     }
 
@@ -1100,16 +1108,19 @@ export default function TimetableApp() {
       return {
         active: false,
         isSelectedTarget: false,
-        canSwap: true
+        canSwap: true,
+        blockReason: ''
       };
     }
 
     const blockedByHoliday = isHolidayCell(sourceLiveCell) || isHolidayCell(targetCell);
+    const blockedByOccupied = !blockedByHoliday && isOccupiedLessonCell(targetCell);
 
     return {
       active: true,
       isSelectedTarget: false,
-      canSwap: !blockedByHoliday
+      canSwap: !blockedByHoliday && !blockedByOccupied,
+      blockReason: blockedByHoliday ? 'holiday' : blockedByOccupied ? 'occupied' : ''
     };
   };
 
@@ -1196,9 +1207,14 @@ export default function TimetableApp() {
       setSelectedCell({ weekName: wName, className: cName, p, d, ...clickedCell });
     } else {
       const sourceCellCurrent = allSchedules[selectedCell.weekName][selectedCell.className][selectedCell.p][selectedCell.d];
+      const swapTargetState = getSwapTargetState(wName, cName, p, d, clickedCell);
       if (isHolidayCell(sourceCellCurrent) || isHolidayCell(clickedCell)) {
         showNotification('휴업일 칸은 수업 교환 대상이 아닙니다. 설정에서 휴업일 해제 후 수정하세요.', 'error');
         setSelectedCell(null);
+        return;
+      }
+      if (swapTargetState.active && !swapTargetState.canSwap && swapTargetState.blockReason === 'occupied') {
+        showNotification('전담 이동은 빈칸으로만 가능합니다. 이미 수업이 있는 칸은 검정 표시 영역입니다.', 'error');
         return;
       }
 
@@ -1512,8 +1528,16 @@ export default function TimetableApp() {
     let overlay = null;
     if (selectedCell && !isSelected) {
       if (swapTargetState.active && !swapTargetState.canSwap) {
-        baseStyle += "opacity-50 cursor-not-allowed ";
-        overlay = <div className="absolute inset-0 bg-red-500 bg-opacity-20 flex items-center justify-center z-20"><X className="text-red-600 w-8 h-8 opacity-70" /></div>;
+        baseStyle += "opacity-60 cursor-not-allowed ";
+        if (swapTargetState.blockReason === 'occupied') {
+          overlay = (
+            <div className="absolute inset-0 bg-black/55 flex items-center justify-center z-20">
+              <span className="text-[11px] font-bold text-white tracking-wide">사용중</span>
+            </div>
+          );
+        } else {
+          overlay = <div className="absolute inset-0 bg-red-500 bg-opacity-20 flex items-center justify-center z-20"><X className="text-red-600 w-8 h-8 opacity-70" /></div>;
+        }
       } else {
         if (swapTargetState.active && swapTargetState.canSwap) {
           baseStyle += "ring-2 ring-inset ring-sky-300 bg-sky-50/40 hover:ring-sky-500 ";
@@ -1572,8 +1596,12 @@ export default function TimetableApp() {
     let overlay = null;
     if (selectedCell && !isSelected) {
       if (swapTargetState.active && !swapTargetState.canSwap) {
-        baseStyle += 'opacity-50 cursor-not-allowed ';
-        overlay = <div className="absolute inset-0 bg-red-500/20 flex items-center justify-center z-20"><X className="text-red-600 w-4 h-4 opacity-70" /></div>;
+        baseStyle += 'opacity-60 cursor-not-allowed ';
+        if (swapTargetState.blockReason === 'occupied') {
+          overlay = <div className="absolute inset-0 bg-black/55 flex items-center justify-center z-20"><span className="text-[8px] font-bold text-white">사용중</span></div>;
+        } else {
+          overlay = <div className="absolute inset-0 bg-red-500/20 flex items-center justify-center z-20"><X className="text-red-600 w-4 h-4 opacity-70" /></div>;
+        }
       } else {
         if (swapTargetState.active && swapTargetState.canSwap) {
           baseStyle += 'ring-2 ring-inset ring-sky-300 bg-sky-50/40 hover:ring-sky-500 ';
@@ -1704,8 +1732,16 @@ export default function TimetableApp() {
     let overlay = null;
     if (selectedCell && !isSelected) {
       if (swapTargetState.active && !swapTargetState.canSwap) {
-        baseStyle += 'opacity-50 cursor-not-allowed ';
-        overlay = <div className="absolute inset-0 bg-red-500/20 flex items-center justify-center z-20"><X className={`text-red-600 ${dense ? 'w-3 h-3' : 'w-4 h-4'} opacity-70`} /></div>;
+        baseStyle += 'opacity-60 cursor-not-allowed ';
+        if (swapTargetState.blockReason === 'occupied') {
+          overlay = (
+            <div className="absolute inset-0 bg-black/55 flex items-center justify-center z-20">
+              <span className={`${dense ? 'text-[7px]' : 'text-[10px]'} font-bold text-white`}>사용중</span>
+            </div>
+          );
+        } else {
+          overlay = <div className="absolute inset-0 bg-red-500/20 flex items-center justify-center z-20"><X className={`text-red-600 ${dense ? 'w-3 h-3' : 'w-4 h-4'} opacity-70`} /></div>;
+        }
       } else {
         if (swapTargetState.active && swapTargetState.canSwap) {
           baseStyle += dense ? 'ring-1 ring-inset ring-sky-300 bg-sky-50/40 hover:ring-sky-500 ' : 'ring-2 ring-inset ring-sky-300 bg-sky-50/40 hover:ring-sky-500 ';
@@ -1961,7 +1997,8 @@ export default function TimetableApp() {
             {isSpecialSelectionForSwapHint && (
               <div className="flex flex-wrap items-center gap-2 text-xs">
                 <span className="px-2 py-1 rounded bg-sky-50 text-sky-700 border border-sky-200 font-semibold">파란 하이라이트: 교환 가능한 영역</span>
-                <span className="px-2 py-1 rounded bg-red-50 text-red-700 border border-red-200 font-semibold">X 오버레이: 교환 불가 영역(휴업일 포함)</span>
+                <span className="px-2 py-1 rounded bg-gray-900 text-white border border-gray-800 font-semibold">검정 오버레이: 이미 수업 있음(교환 불가)</span>
+                <span className="px-2 py-1 rounded bg-red-50 text-red-700 border border-red-200 font-semibold">X 오버레이: 휴업일(교환 불가)</span>
               </div>
             )}
 
@@ -2248,8 +2285,12 @@ export default function TimetableApp() {
                               let overlay = null;
                               if (selectedCell && !isSelected) {
                                 if (swapTargetState.active && !swapTargetState.canSwap) {
-                                  cellClass += "opacity-50 cursor-not-allowed ";
-                                  overlay = <div className="absolute inset-0 bg-red-500 bg-opacity-20 flex items-center justify-center z-20"><X className="text-red-600 w-5 h-5 opacity-70" /></div>;
+                                  cellClass += "opacity-60 cursor-not-allowed ";
+                                  if (swapTargetState.blockReason === 'occupied') {
+                                    overlay = <div className="absolute inset-0 bg-black/55 flex items-center justify-center z-20"><span className="text-[9px] font-bold text-white">사용중</span></div>;
+                                  } else {
+                                    overlay = <div className="absolute inset-0 bg-red-500 bg-opacity-20 flex items-center justify-center z-20"><X className="text-red-600 w-5 h-5 opacity-70" /></div>;
+                                  }
                                 } else {
                                   if (swapTargetState.active && swapTargetState.canSwap) {
                                     cellClass += "ring-2 ring-inset ring-sky-300 bg-sky-50/40 hover:ring-sky-500 ";
