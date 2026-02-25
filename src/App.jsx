@@ -5,15 +5,62 @@ import { supabase, isSupabaseConfigured } from './lib/supabaseClient';
 // --- [1] 기본 설정 및 학사일정 주차 생성 ---
 const DAYS = ['월', '화', '수', '목', '금'];
 const PERIODS = [1, 2, 3, 4, 5, 6];
-const CLASSES = Array.from({ length: 12 }, (_, i) => `${i + 1}반`);
+const MIN_CLASS_COUNT = 1;
+const MAX_CLASS_COUNT = 20;
+const DEFAULT_CLASS_COUNT = 12;
 
-const ALL_SUBJECTS = [
+const DEFAULT_SUBJECTS = [
   '국어', '사회', '도덕', '수학', '과학', '실과', '체육', '음악', '미술', '영어', 
   '자율자치', '동아리', '봉사', '진로', '학교자율', '창체', '휴업일'
 ];
+const DEFAULT_HOMEROOM_SUBJECTS = ['국어', '수학', '사회', '도덕', '미술', '창체'];
 
 const HOMEROOM_FLEX_SUBJECTS = ['과학', '체육', '음악'];
 const HOMEROOM_OVERRIDE_PREFIX = '__homeroom__::';
+
+const createClassNames = (classCount = DEFAULT_CLASS_COUNT) =>
+  Array.from({ length: classCount }, (_, i) => `${i + 1}반`);
+
+const normalizeClassCount = (value, fallback = DEFAULT_CLASS_COUNT) => {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed)) return fallback;
+  return Math.min(MAX_CLASS_COUNT, Math.max(MIN_CLASS_COUNT, parsed));
+};
+
+const normalizeSubjects = (source, fallback = DEFAULT_SUBJECTS) => {
+  const sourceList = Array.isArray(source)
+    ? source
+    : String(source ?? '').split(/[,\n]/g);
+  const deduped = [...new Set(
+    sourceList
+      .map((item) => String(item ?? '').trim())
+      .filter(Boolean)
+  )];
+
+  const withoutHoliday = deduped.filter((subject) => subject !== '휴업일');
+  if (withoutHoliday.length === 0) {
+    const fallbackWithoutHoliday = [...new Set(
+      (Array.isArray(fallback) ? fallback : DEFAULT_SUBJECTS)
+        .map((item) => String(item ?? '').trim())
+        .filter(Boolean)
+    )].filter((subject) => subject !== '휴업일');
+    if (fallbackWithoutHoliday.length > 0) {
+      withoutHoliday.push(...fallbackWithoutHoliday);
+    } else {
+      withoutHoliday.push('국어');
+    }
+  }
+
+  return [...withoutHoliday, '휴업일'];
+};
+
+const getHomeroomSubjectPool = (subjectPool = DEFAULT_SUBJECTS) => {
+  const filtered = normalizeSubjects(subjectPool).filter((subject) =>
+    subject !== '휴업일' && !HOMEROOM_FLEX_SUBJECTS.includes(subject)
+  );
+  if (filtered.length > 0) return filtered;
+  return DEFAULT_HOMEROOM_SUBJECTS;
+};
 
 const toHomeroomOverrideValue = (subject) => `${HOMEROOM_OVERRIDE_PREFIX}${subject}`;
 
@@ -36,7 +83,8 @@ const getSubjectSelectionValueForCell = (cell) => {
   return cell.subject || '';
 };
 
-const SUBJECT_SELECT_OPTIONS = ALL_SUBJECTS.flatMap((subject) => {
+const buildSubjectSelectOptions = (subjectPool = DEFAULT_SUBJECTS) =>
+  normalizeSubjects(subjectPool).flatMap((subject) => {
   if (!HOMEROOM_FLEX_SUBJECTS.includes(subject)) {
     return [{ value: subject, label: subject }];
   }
@@ -45,7 +93,7 @@ const SUBJECT_SELECT_OPTIONS = ALL_SUBJECTS.flatMap((subject) => {
     { value: subject, label: `${subject} (전담)` },
     { value: toHomeroomOverrideValue(subject), label: `${subject} (담임)` }
   ];
-});
+  });
 
 const WEEK_START_DATES = {};
 
@@ -109,15 +157,7 @@ for(let i=0; i<WEEKS.length; i+=4) {
 }
 
 // --- [2] 전담 교사 및 장소 로직 ---
-const initialTeachers = [
-  { id: 't1', name: '하승호', subject: '체육', classes: [1,2,3,4,5,6,7,8,9,10] },
-  { id: 't2', name: '이지훈', subject: '체육', classes: [11,12] },
-  { id: 't3', name: '윤지은', subject: '영어', classes: [1,2,3,4,5,6] },
-  { id: 't4', name: '김수연', subject: '영어', classes: [7,8,9,10,11,12] },
-  { id: 't5', name: '이소연', subject: '과학', classes: [1,2,3,4,5,6,7,8,9,10] },
-  { id: 't6', name: '류동휘', subject: '과학', classes: [11,12] },
-  { id: 't7', name: '장지은', subject: '음악', classes: [1,2,3,4,5,6,7,8,9,10,11,12] }
-];
+const initialTeachers = [];
 
 const getSubjectColor = (subject) => {
   if (!subject) return 'bg-gray-100 border-dashed border-2 text-gray-400'; // 빈칸(삭제됨)
@@ -161,9 +201,13 @@ const getDefaultLocation = (subject, dayIndex, periodIndex) => {
 };
 
 // --- [3] 초기 시간표 생성 ---
-const generateInitialBaseSchedule = (teachers = initialTeachers) => {
+const generateInitialBaseSchedule = (
+  teachers = initialTeachers,
+  classNames = createClassNames(DEFAULT_CLASS_COUNT),
+  subjectPool = DEFAULT_SUBJECTS
+) => {
   const schedule = {};
-  CLASSES.forEach(cls => {
+  classNames.forEach(cls => {
     schedule[cls] = Array(6).fill(null).map(() => Array(5).fill({ subject: '', type: 'empty' }));
   });
 
@@ -172,7 +216,7 @@ const generateInitialBaseSchedule = (teachers = initialTeachers) => {
   teachers.forEach(t => teacherOccupied[t.id] = new Set());
 
   // 1. 전담 배정
-  CLASSES.forEach((cls) => {
+  classNames.forEach((cls) => {
     const classNum = parseInt(cls.replace('반', ''));
     specialSubjects.forEach((subject) => {
       const teacher = teachers.find(t => t.subject === subject && t.classes.includes(classNum));
@@ -200,8 +244,8 @@ const generateInitialBaseSchedule = (teachers = initialTeachers) => {
   });
 
   // 2. 담임 채우기 (66566 반영)
-  const defaultSubjects = ['국어', '수학', '사회', '도덕', '미술', '창체'];
-  CLASSES.forEach(cls => {
+  const defaultSubjects = getHomeroomSubjectPool(subjectPool);
+  classNames.forEach(cls => {
     for(let p=0; p<6; p++) {
       for(let d=0; d<5; d++) {
         // [기본 66566 세팅] 수요일(2) 6교시(5)는 비워둠
@@ -224,16 +268,18 @@ const generateInitialBaseSchedule = (teachers = initialTeachers) => {
   return schedule;
 };
 
-const createAllSchedules = (teachers = initialTeachers) => {
-  const base = generateInitialBaseSchedule(teachers);
+const createAllSchedules = (
+  teachers = initialTeachers,
+  classNames = createClassNames(DEFAULT_CLASS_COUNT),
+  subjectPool = DEFAULT_SUBJECTS
+) => {
+  const base = generateInitialBaseSchedule(teachers, classNames, subjectPool);
   const allByWeek = {};
   WEEKS.forEach(week => {
     allByWeek[week] = JSON.parse(JSON.stringify(base));
   });
   return allByWeek;
 };
-
-const DEFAULT_HOMEROOM_SUBJECTS = ['국어', '수학', '사회', '도덕', '미술', '창체'];
 
 const createTemplateCell = (className = '', location = '') => ({
   className,
@@ -283,17 +329,39 @@ const normalizeSpecialTemplates = (teachers, templates = {}) => {
   return normalized;
 };
 
-const createHomeroomFallbackCell = (className, periodIndex, dayIndex) => ({
-  subject: DEFAULT_HOMEROOM_SUBJECTS[(periodIndex + dayIndex) % DEFAULT_HOMEROOM_SUBJECTS.length],
-  type: 'homeroom',
-  forcedConflict: false,
-  location: '',
-  id: `${className}-${periodIndex}-${dayIndex}`
-});
+const createHomeroomFallbackCell = (
+  className,
+  periodIndex,
+  dayIndex,
+  subjectPool = DEFAULT_SUBJECTS
+) => {
+  const homeroomSubjects = getHomeroomSubjectPool(subjectPool);
+  return {
+    subject: homeroomSubjects[(periodIndex + dayIndex) % homeroomSubjects.length],
+    type: 'homeroom',
+    forcedConflict: false,
+    location: '',
+    id: `${className}-${periodIndex}-${dayIndex}`
+  };
+};
 
 const isPlainObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 
-const normalizeTeacherConfigsForSync = (sourceTeachers, fallbackTeachers = []) => {
+const createInitialStandardHours = (subjectPool = DEFAULT_SUBJECTS) => {
+  const initial = {};
+  normalizeSubjects(subjectPool).forEach((subject) => {
+    initial[subject] = 0;
+  });
+  return initial;
+};
+
+const normalizeTeacherConfigsForSync = (
+  sourceTeachers,
+  fallbackTeachers = [],
+  options = {}
+) => {
+  const classCount = normalizeClassCount(options.classCount, DEFAULT_CLASS_COUNT);
+  const subjectPool = normalizeSubjects(options.subjectPool || DEFAULT_SUBJECTS);
   if (!Array.isArray(sourceTeachers)) return fallbackTeachers;
 
   const normalized = sourceTeachers
@@ -305,14 +373,15 @@ const normalizeTeacherConfigsForSync = (sourceTeachers, fallbackTeachers = []) =
       const safeName = typeof teacher.name === 'string' && teacher.name.trim()
         ? teacher.name.trim()
         : `교사${idx + 1}`;
-      const safeSubject = typeof teacher.subject === 'string' && teacher.subject.trim()
-        ? teacher.subject.trim()
-        : (ALL_SUBJECTS[0] || '국어');
+      const rawSubject = typeof teacher.subject === 'string' ? teacher.subject.trim() : '';
+      const safeSubject = rawSubject && subjectPool.includes(rawSubject)
+        ? rawSubject
+        : (subjectPool[0] || '국어');
       const safeClasses = Array.isArray(teacher.classes)
         ? [...new Set(
           teacher.classes
             .map((cls) => Number(cls))
-            .filter((num) => Number.isInteger(num) && num >= 1 && num <= CLASSES.length)
+            .filter((num) => Number.isInteger(num) && num >= 1 && num <= classCount)
         )].sort((a, b) => a - b)
         : [];
 
@@ -325,14 +394,18 @@ const normalizeTeacherConfigsForSync = (sourceTeachers, fallbackTeachers = []) =
     })
     .filter((teacher) => teacher.classes.length > 0);
 
-  return normalized.length > 0 ? normalized : fallbackTeachers;
+  return normalized;
 };
 
-const normalizeStandardHoursForSync = (sourceStandardHours, fallbackStandardHours) => {
+const normalizeStandardHoursForSync = (
+  sourceStandardHours,
+  fallbackStandardHours,
+  subjectPool = DEFAULT_SUBJECTS
+) => {
   const next = { ...fallbackStandardHours };
   if (!isPlainObject(sourceStandardHours)) return next;
 
-  ALL_SUBJECTS.forEach((subject) => {
+  normalizeSubjects(subjectPool).forEach((subject) => {
     const raw = sourceStandardHours[subject];
     const value = typeof raw === 'number' ? raw : Number(raw);
     if (Number.isFinite(value)) next[subject] = value;
@@ -341,7 +414,12 @@ const normalizeStandardHoursForSync = (sourceStandardHours, fallbackStandardHour
   return next;
 };
 
-const normalizeAllSchedulesForSync = (sourceAllSchedules, fallbackAllSchedules) => {
+const normalizeAllSchedulesForSync = (
+  sourceAllSchedules,
+  fallbackAllSchedules,
+  classNames = createClassNames(DEFAULT_CLASS_COUNT),
+  subjectPool = DEFAULT_SUBJECTS
+) => {
   const next = {};
 
   WEEKS.forEach((weekName) => {
@@ -349,7 +427,7 @@ const normalizeAllSchedulesForSync = (sourceAllSchedules, fallbackAllSchedules) 
     const fallbackWeek = isPlainObject(fallbackAllSchedules?.[weekName]) ? fallbackAllSchedules[weekName] : {};
     next[weekName] = {};
 
-    CLASSES.forEach((className) => {
+    classNames.forEach((className) => {
       const sourceGrid = Array.isArray(sourceWeek?.[className]) ? sourceWeek[className] : null;
       const fallbackGrid = Array.isArray(fallbackWeek?.[className]) ? fallbackWeek[className] : null;
 
@@ -358,7 +436,7 @@ const normalizeAllSchedulesForSync = (sourceAllSchedules, fallbackAllSchedules) 
           const fallbackCellRaw = fallbackGrid?.[pIdx]?.[dIdx];
           const fallbackCell = isPlainObject(fallbackCellRaw)
             ? { ...fallbackCellRaw }
-            : createHomeroomFallbackCell(className, pIdx, dIdx);
+            : createHomeroomFallbackCell(className, pIdx, dIdx, subjectPool);
           const rawCell = sourceGrid?.[pIdx]?.[dIdx];
 
           if (!isPlainObject(rawCell)) {
@@ -394,6 +472,17 @@ const normalizeAllSchedulesForSync = (sourceAllSchedules, fallbackAllSchedules) 
   return next;
 };
 
+const normalizeClassConfigForSync = (payload, fallbackClassCount, fallbackSubjects) => {
+  const rawClassCount = payload?.classConfig?.classCount ?? payload?.classCount;
+  const rawSubjects = payload?.classConfig?.subjects ?? payload?.subjects;
+  const classCount = normalizeClassCount(rawClassCount, fallbackClassCount);
+  const subjects = normalizeSubjects(rawSubjects, fallbackSubjects);
+  return {
+    classCount,
+    subjects
+  };
+};
+
 const normalizeWeeklyNoticesForSync = (sourceWeeklyNotices, fallbackWeeklyNotices = {}) => {
   const source = isPlainObject(sourceWeeklyNotices) ? sourceWeeklyNotices : {};
   const fallback = isPlainObject(fallbackWeeklyNotices) ? fallbackWeeklyNotices : {};
@@ -415,16 +504,45 @@ const normalizeWeeklyNoticesForSync = (sourceWeeklyNotices, fallbackWeeklyNotice
 const normalizePayloadForSync = (payload, fallbackSnapshot) => {
   if (!isPlainObject(payload) || !isPlainObject(fallbackSnapshot)) return null;
 
+  const fallbackConfig = normalizeClassConfigForSync(
+    fallbackSnapshot,
+    DEFAULT_CLASS_COUNT,
+    DEFAULT_SUBJECTS
+  );
+  const resolvedConfig = normalizeClassConfigForSync(
+    payload,
+    fallbackConfig.classCount,
+    fallbackConfig.subjects
+  );
+  const classNames = createClassNames(resolvedConfig.classCount);
   const fallbackTeachers = normalizeTeacherConfigsForSync(
     fallbackSnapshot.teacherConfigs,
-    initialTeachers
+    initialTeachers,
+    {
+      classCount: resolvedConfig.classCount,
+      subjectPool: resolvedConfig.subjects
+    }
   );
-  const teacherConfigs = normalizeTeacherConfigsForSync(payload.teacherConfigs, fallbackTeachers);
+  const teacherConfigs = normalizeTeacherConfigsForSync(payload.teacherConfigs, fallbackTeachers, {
+    classCount: resolvedConfig.classCount,
+    subjectPool: resolvedConfig.subjects
+  });
   const allSchedules = normalizeAllSchedulesForSync(
     isPlainObject(payload.allSchedules) ? payload.allSchedules : fallbackSnapshot.allSchedules,
-    fallbackSnapshot.allSchedules
+    fallbackSnapshot.allSchedules,
+    classNames,
+    resolvedConfig.subjects
   );
-  const standardHours = normalizeStandardHoursForSync(payload.standardHours, fallbackSnapshot.standardHours);
+  const fallbackStandardHours = normalizeStandardHoursForSync(
+    fallbackSnapshot.standardHours,
+    createInitialStandardHours(resolvedConfig.subjects),
+    resolvedConfig.subjects
+  );
+  const standardHours = normalizeStandardHoursForSync(
+    payload.standardHours,
+    fallbackStandardHours,
+    resolvedConfig.subjects
+  );
   const specialTemplates = normalizeSpecialTemplates(
     teacherConfigs,
     isPlainObject(payload.specialTemplates) ? payload.specialTemplates : fallbackSnapshot.specialTemplates
@@ -443,7 +561,9 @@ const normalizePayloadForSync = (payload, fallbackSnapshot) => {
     teacherConfigs,
     specialTemplates,
     changeLogs,
-    weeklyNotices
+    weeklyNotices,
+    classCount: resolvedConfig.classCount,
+    subjects: resolvedConfig.subjects
   };
 };
 
@@ -465,21 +585,27 @@ const cloneSchedulesForHistory = (schedules) => {
 
 // --- [4] 메인 컴포넌트 ---
 export default function TimetableApp() {
+  const [classCount, setClassCount] = useState(DEFAULT_CLASS_COUNT);
+  const [subjects, setSubjects] = useState(() => normalizeSubjects(DEFAULT_SUBJECTS));
+  const [classCountInput, setClassCountInput] = useState(String(DEFAULT_CLASS_COUNT));
+  const [subjectsInputText, setSubjectsInputText] = useState(() => normalizeSubjects(DEFAULT_SUBJECTS).join('\n'));
+  const classNames = useMemo(() => createClassNames(classCount), [classCount]);
+  const allSubjects = useMemo(() => normalizeSubjects(subjects, DEFAULT_SUBJECTS), [subjects]);
+  const subjectSelectOptions = useMemo(() => buildSubjectSelectOptions(allSubjects), [allSubjects]);
   const [teacherConfigs, setTeacherConfigs] = useState(initialTeachers);
-  const [allSchedules, setAllSchedules] = useState(() => createAllSchedules(initialTeachers));
+  const [allSchedules, setAllSchedules] = useState(() =>
+    createAllSchedules(initialTeachers, createClassNames(DEFAULT_CLASS_COUNT), normalizeSubjects(DEFAULT_SUBJECTS))
+  );
   const [undoStack, setUndoStack] = useState([]);
   const [redoStack, setRedoStack] = useState([]);
   const [changeLogs, setChangeLogs] = useState([]);
   const [weeklyNotices, setWeeklyNotices] = useState(() => normalizeWeeklyNoticesForSync({}));
   const [showChangeSummary, setShowChangeSummary] = useState(false);
   const [baselineReady, setBaselineReady] = useState(false);
+  const [pendingResolution, setPendingResolution] = useState(null);
 
   // 기준 시수 상태 관리
-  const [standardHours, setStandardHours] = useState(() => {
-    const initial = {};
-    ALL_SUBJECTS.forEach(s => initial[s] = 0);
-    return initial;
-  });
+  const [standardHours, setStandardHours] = useState(() => createInitialStandardHours(normalizeSubjects(DEFAULT_SUBJECTS)));
 
   const [viewMode, setViewMode] = useState('weekly'); // weekly, monthly, class_summary, teacher_summary, settings
   const [weeklyLayoutMode, setWeeklyLayoutMode] = useState('single'); // single, all
@@ -543,7 +669,7 @@ export default function TimetableApp() {
   const contextMenuTop = cellSubjectContextMenu
     ? Math.max(8, Math.min(cellSubjectContextMenu.y, contextViewportHeight - 240))
     : 0;
-  const schedules = allSchedules[currentWeekName];
+  const schedules = allSchedules[currentWeekName] || {};
   const normalizedSpecialTemplates = useMemo(
     () => normalizeSpecialTemplates(teacherConfigs, specialTemplates),
     [teacherConfigs, specialTemplates]
@@ -575,7 +701,7 @@ export default function TimetableApp() {
   }, [teacherConfigs]);
   const templateExpectationMap = useMemo(() => {
     const map = {};
-    CLASSES.forEach((className) => {
+    classNames.forEach((className) => {
       map[className] = Array.from({ length: PERIODS.length }, () =>
         Array.from({ length: DAYS.length }, () => null)
       );
@@ -609,7 +735,7 @@ export default function TimetableApp() {
     });
 
     return map;
-  }, [teacherConfigs, normalizedSpecialTemplates]);
+  }, [teacherConfigs, normalizedSpecialTemplates, classNames]);
   const hasConfiguredSpecialTemplate = useMemo(
     () =>
       teacherConfigs.some((teacher) =>
@@ -619,6 +745,21 @@ export default function TimetableApp() {
       ),
     [teacherConfigs, normalizedSpecialTemplates]
   );
+
+  useEffect(() => {
+    if (classNames.length === 0) return;
+    if (!classNames.includes(currentClass)) {
+      setCurrentClass(classNames[0]);
+    }
+  }, [classNames, currentClass]);
+
+  useEffect(() => {
+    setClassCountInput(String(classCount));
+  }, [classCount]);
+
+  useEffect(() => {
+    setSubjectsInputText(allSubjects.join('\n'));
+  }, [allSubjects]);
 
   useEffect(() => {
     if (!toast.show) return undefined;
@@ -757,7 +898,7 @@ export default function TimetableApp() {
 
     const items = [];
 
-    CLASSES.forEach((className) => {
+    classNames.forEach((className) => {
       for (let p = 0; p < PERIODS.length; p++) {
         for (let d = 0; d < DAYS.length; d++) {
           let expectedEntries = [];
@@ -800,7 +941,7 @@ export default function TimetableApp() {
     });
 
     return items;
-  }, [allSchedules, currentWeekName, templateExpectationMap, hasConfiguredSpecialTemplate, baselineReady]);
+  }, [allSchedules, currentWeekName, templateExpectationMap, hasConfiguredSpecialTemplate, baselineReady, classNames]);
 
   const quickEditorActionGuideText = useMemo(() => {
     if (quickEditorAction === 'swap') {
@@ -986,7 +1127,10 @@ export default function TimetableApp() {
     };
   }, [cellSubjectContextMenu, contextMenuSubjectValue, contextMenuInitialSubjectValue]);
 
-  const teacherAssignableSubjects = ALL_SUBJECTS.filter(subject => subject !== '휴업일');
+  const teacherAssignableSubjects = useMemo(
+    () => allSubjects.filter((subject) => subject !== '휴업일'),
+    [allSubjects]
+  );
 
   const resetTeacherForm = () => {
     setEditingTeacherId(null);
@@ -996,6 +1140,30 @@ export default function TimetableApp() {
       classes: []
     });
   };
+
+  useEffect(() => {
+    setTeacherForm((prev) => {
+      const normalizedClasses = [...new Set(
+        (prev.classes || [])
+          .map((num) => Number(num))
+          .filter((num) => Number.isInteger(num) && num >= 1 && num <= classCount)
+      )].sort((a, b) => a - b);
+      const normalizedSubject = teacherAssignableSubjects.includes(prev.subject)
+        ? prev.subject
+        : (teacherAssignableSubjects.includes('체육') ? '체육' : (teacherAssignableSubjects[0] || ''));
+
+      const classesUnchanged =
+        normalizedClasses.length === (prev.classes || []).length &&
+        normalizedClasses.every((value, index) => value === prev.classes[index]);
+      if (classesUnchanged && normalizedSubject === prev.subject) return prev;
+
+      return {
+        ...prev,
+        subject: normalizedSubject,
+        classes: normalizedClasses
+      };
+    });
+  }, [teacherAssignableSubjects, classCount]);
 
   const toggleTeacherClassSelection = (classNum) => {
     setTeacherForm((prev) => {
@@ -1021,7 +1189,11 @@ export default function TimetableApp() {
 
   const saveTeacherConfig = () => {
     const trimmedName = teacherForm.name.trim();
-    const selectedClasses = [...new Set(teacherForm.classes)].sort((a, b) => a - b);
+    const selectedClasses = [...new Set(
+      teacherForm.classes
+        .map((num) => Number(num))
+        .filter((num) => Number.isInteger(num) && num >= 1 && num <= classCount)
+    )].sort((a, b) => a - b);
 
     if (!trimmedName) {
       showNotification('교사명을 입력해주세요.', 'error');
@@ -1078,6 +1250,90 @@ export default function TimetableApp() {
     });
   };
 
+  const applyClassAndSubjectSettings = () => {
+    const nextClassCount = normalizeClassCount(classCountInput, classCount);
+    const nextSubjects = normalizeSubjects(subjectsInputText, allSubjects);
+    const nextClassNames = createClassNames(nextClassCount);
+
+    const isClassCountChanged = nextClassCount !== classCount;
+    const isSubjectsChanged = JSON.stringify(nextSubjects) !== JSON.stringify(allSubjects);
+    if (!isClassCountChanged && !isSubjectsChanged) {
+      showNotification('변경된 설정이 없습니다.', 'info');
+      return;
+    }
+
+    if (isClassCountChanged && nextClassCount < classCount) {
+      const confirmShrink = window.confirm(
+        `학급 수를 ${classCount}개에서 ${nextClassCount}개로 줄이면 상위 학급 데이터가 제외될 수 있습니다. 계속할까요?`
+      );
+      if (!confirmShrink) return;
+    }
+
+    const nextTeachers = normalizeTeacherConfigsForSync(teacherConfigs, [], {
+      classCount: nextClassCount,
+      subjectPool: nextSubjects
+    });
+    const nextAllSchedules = normalizeAllSchedulesForSync(
+      allSchedules,
+      createAllSchedules([], nextClassNames, nextSubjects),
+      nextClassNames,
+      nextSubjects
+    );
+    const nextStandardHours = normalizeStandardHoursForSync(
+      standardHours,
+      createInitialStandardHours(nextSubjects),
+      nextSubjects
+    );
+    const nextSpecialTemplates = normalizeSpecialTemplates(nextTeachers, specialTemplates);
+
+    const nextSelectedCell =
+      selectedCell && nextClassNames.includes(selectedCell.className)
+        ? selectedCell
+        : null;
+
+    setClassCount(nextClassCount);
+    setSubjects(nextSubjects);
+    setTeacherConfigs(nextTeachers);
+    setSpecialTemplates(nextSpecialTemplates);
+    setStandardHours(nextStandardHours);
+    setHighlightTeacherIds((prev) => prev.filter((id) => nextTeachers.some((teacher) => teacher.id === id)));
+    setPendingResolution(null);
+    if (!nextClassNames.includes(currentClass)) {
+      setCurrentClass(nextClassNames[0]);
+    }
+    if (selectedTemplateTeacherId && !nextTeachers.some((teacher) => teacher.id === selectedTemplateTeacherId)) {
+      setSelectedTemplateTeacherId(nextTeachers[0]?.id || '');
+    }
+
+    applyScheduleChangeWithHistory({
+      nextAllSchedules,
+      nextSelectedCell,
+      changeLogEntry: createChangeLogEntry({
+        type: 'config_update',
+        summary: `기본 설정 변경: 학급 ${nextClassCount}개, 과목 ${nextSubjects.length}개`,
+        announcementText: `기본 설정 변경: 학급 ${nextClassCount}개 / 과목 ${nextSubjects.join(', ')}`,
+        weekKeys: [currentWeekName]
+      })
+    });
+
+    showNotification('학급 수/과목 설정을 적용했습니다.', 'success', { actionType: 'undo', duration: 5500 });
+  };
+
+  const clearAllSpecialConfigurations = () => {
+    const ok = window.confirm(
+      '전담 교사, 전담 템플릿, 전담 하이라이트를 모두 삭제할까요?\n기존 시간표는 유지됩니다.'
+    );
+    if (!ok) return;
+
+    setTeacherConfigs([]);
+    setSpecialTemplates({});
+    setSelectedTemplateTeacherId('');
+    setHighlightTeacherIds([]);
+    setPendingResolution(null);
+    resetTeacherForm();
+    showNotification('전담 교사/템플릿 설정을 모두 삭제했습니다.', 'success');
+  };
+
   useEffect(() => {
     setSpecialTemplates((prev) => normalizeSpecialTemplates(teacherConfigs, prev));
     setSelectedTemplateTeacherId((prev) => {
@@ -1131,7 +1387,7 @@ export default function TimetableApp() {
 
       const weekSchedule = JSON.parse(JSON.stringify(sourceWeek));
 
-      CLASSES.forEach((className) => {
+      classNames.forEach((className) => {
         for (let p = 0; p < PERIODS.length; p++) {
           for (let d = 0; d < DAYS.length; d++) {
             if (weekSchedule[className][p][d]?.type === 'special') {
@@ -1222,6 +1478,12 @@ export default function TimetableApp() {
     let retryTimer = null;
 
     const getFallbackSnapshot = () => ({
+      classCount,
+      subjects: allSubjects,
+      classConfig: {
+        classCount,
+        subjects: allSubjects
+      },
       allSchedules,
       standardHours,
       teacherConfigs,
@@ -1235,6 +1497,12 @@ export default function TimetableApp() {
       if (!normalizedPayload) return false;
 
       const payloadForSync = {
+        classCount: normalizedPayload.classCount,
+        subjects: normalizedPayload.subjects,
+        classConfig: {
+          classCount: normalizedPayload.classCount,
+          subjects: normalizedPayload.subjects
+        },
         allSchedules: normalizedPayload.allSchedules,
         standardHours: normalizedPayload.standardHours,
         teacherConfigs: normalizedPayload.teacherConfigs,
@@ -1244,7 +1512,11 @@ export default function TimetableApp() {
       };
 
       isApplyingRemoteRef.current = true;
+      const nextRemoteClassNames = createClassNames(payloadForSync.classCount);
+      setClassCount(payloadForSync.classCount);
+      setSubjects(payloadForSync.subjects);
       setAllSchedules(payloadForSync.allSchedules);
+      setCurrentClass((prev) => (nextRemoteClassNames.includes(prev) ? prev : (nextRemoteClassNames[0] || '1반')));
       setSelectedCell(null);
       setStandardHours(payloadForSync.standardHours);
       setTeacherConfigs(payloadForSync.teacherConfigs);
@@ -1367,7 +1639,20 @@ export default function TimetableApp() {
     if (!isRemoteReadyRef.current) return undefined;
     if (isApplyingRemoteRef.current) return undefined;
 
-    const payload = { allSchedules, standardHours, teacherConfigs, specialTemplates, changeLogs, weeklyNotices };
+    const payload = {
+      classCount,
+      subjects: allSubjects,
+      classConfig: {
+        classCount,
+        subjects: allSubjects
+      },
+      allSchedules,
+      standardHours,
+      teacherConfigs,
+      specialTemplates,
+      changeLogs,
+      weeklyNotices
+    };
     const payloadText = JSON.stringify(payload);
 
     if (payloadText === lastSyncedPayloadRef.current) return undefined;
@@ -1393,14 +1678,14 @@ export default function TimetableApp() {
     return () => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     };
-  }, [allSchedules, standardHours, teacherConfigs, specialTemplates, changeLogs, weeklyNotices]);
+  }, [classCount, allSubjects, allSchedules, standardHours, teacherConfigs, specialTemplates, changeLogs, weeklyNotices]);
 
   const findTeacherOverlapClasses = (schedulesMap, weekName, className, periodIndex, dayIndex, teacherId) => {
     if (!teacherId) return [];
     const weekSchedule = schedulesMap?.[weekName];
     if (!weekSchedule) return [];
 
-    return CLASSES.filter((cls) => {
+    return classNames.filter((cls) => {
       if (cls === className) return false;
       const targetCell = weekSchedule[cls]?.[periodIndex]?.[dayIndex];
       return targetCell?.type === 'special' && targetCell.teacherId === teacherId;
@@ -1446,7 +1731,7 @@ export default function TimetableApp() {
       )
     );
 
-    return CLASSES.filter((cls) => {
+    return classNames.filter((cls) => {
       const key = `${weekName}|${cls}|${periodIndex}|${dayIndex}`;
       if (ignored.has(key)) return false;
       const cell = weekSchedule?.[cls]?.[periodIndex]?.[dayIndex];
@@ -1689,7 +1974,7 @@ export default function TimetableApp() {
     // 휴업일이나 빈칸은 충돌 검사 제외
     if (sourceCell.type !== 'homeroom' && sourceCell.type !== 'empty' && sourceCell.type !== 'holiday' && sourceCell.teacherId) {
       const conflicts = [];
-      for (const cls of CLASSES) {
+      for (const cls of classNames) {
         if (cls === targetClass) continue;
         if (sourceWeek === targetWeek && sourceP === targetP && sourceD === targetD && cls === sourceClass) continue;
         if (allSchedules[targetWeek][cls][targetP][targetD].teacherId === sourceCell.teacherId) {
@@ -1702,7 +1987,7 @@ export default function TimetableApp() {
     }
     if (targetCell.type !== 'homeroom' && targetCell.type !== 'empty' && targetCell.type !== 'holiday' && targetCell.teacherId) {
       const conflicts = [];
-      for (const cls of CLASSES) {
+      for (const cls of classNames) {
         if (cls === sourceClass) continue;
         if (sourceWeek === targetWeek && sourceP === targetP && sourceD === targetD && cls === targetClass) continue;
         if (allSchedules[sourceWeek][cls][sourceP][sourceD].teacherId === targetCell.teacherId) {
@@ -1902,6 +2187,243 @@ export default function TimetableApp() {
     }
   };
 
+  const applyResolutionOperations = (sourceSchedules, operations = []) => {
+    const nextSchedules = cloneSchedulesForHistory(sourceSchedules);
+    if (!Array.isArray(operations)) return nextSchedules;
+
+    const getCellAt = (pos) => nextSchedules?.[pos.weekName]?.[pos.className]?.[pos.p]?.[pos.d];
+    const setCellAt = (pos, cell) => {
+      if (!nextSchedules?.[pos.weekName]?.[pos.className]?.[pos.p]) return;
+      nextSchedules[pos.weekName][pos.className][pos.p][pos.d] = {
+        ...cell,
+        forcedConflict: Boolean(cell?.forcedConflict),
+        id: typeof cell?.id === 'string' ? cell.id : `${pos.className}-${pos.p}-${pos.d}`
+      };
+    };
+
+    operations.forEach((operation) => {
+      if (!operation || typeof operation !== 'object') return;
+      if (operation.kind === 'swap') {
+        const fromCell = getCellAt(operation.a);
+        const toCell = getCellAt(operation.b);
+        if (!fromCell || !toCell) return;
+        setCellAt(operation.a, toCell);
+        setCellAt(operation.b, fromCell);
+      }
+      if (operation.kind === 'set') {
+        setCellAt(operation.at, operation.cell);
+      }
+    });
+
+    return nextSchedules;
+  };
+
+  const collectChangedPositionsFromPlan = (operations = []) => {
+    const map = new Map();
+    operations.forEach((operation) => {
+      if (!operation || typeof operation !== 'object') return;
+      if (operation.kind === 'swap') {
+        [operation.a, operation.b].forEach((pos) => {
+          if (!pos) return;
+          map.set(`${pos.weekName}|${pos.className}|${pos.p}|${pos.d}`, pos);
+        });
+      } else if (operation.kind === 'set' && operation.at) {
+        const pos = operation.at;
+        map.set(`${pos.weekName}|${pos.className}|${pos.p}|${pos.d}`, pos);
+      }
+    });
+    return Array.from(map.values());
+  };
+
+  const scoreResolutionPlan = (operations, options = {}) => {
+    const simulatedSchedules = applyResolutionOperations(allSchedules, operations);
+    const changedPositions = collectChangedPositionsFromPlan(operations);
+
+    let mismatchCount = 0;
+    let overlapCount = 0;
+
+    changedPositions.forEach((pos) => {
+      const cell = simulatedSchedules?.[pos.weekName]?.[pos.className]?.[pos.p]?.[pos.d];
+      if (!cell) return;
+      if (hasTeacherOverlapConflict(pos.weekName, pos.className, pos.p, pos.d, cell, simulatedSchedules)) {
+        overlapCount += 1;
+      }
+      if (isCellMismatchedWithTemplate(pos.weekName, pos.className, pos.p, pos.d, cell)) {
+        mismatchCount += 1;
+      }
+    });
+
+    const forcePenalty = options.isForced ? 120 : 0;
+    const score = operations.length * 10 + overlapCount * 18 + mismatchCount * 6 + forcePenalty;
+
+    const warnings = [];
+    if (options.isForced) warnings.push('교사 조건을 무시하는 강제 적용입니다. (빨간 테두리)');
+    if (overlapCount > 0) warnings.push(`적용 후 전담 중복 경고 ${overlapCount}건이 남습니다.`);
+    if (mismatchCount > 0) warnings.push(`적용 후 템플릿 불일치 ${mismatchCount}건이 생길 수 있습니다.`);
+
+    return { score, warnings };
+  };
+
+  const buildSpecialConflictResolutionPlans = ({
+    weekName,
+    className,
+    periodIndex,
+    dayIndex,
+    nextCell
+  }) => {
+    const overlapClasses = findTeacherOverlapClasses(
+      allSchedules,
+      weekName,
+      className,
+      periodIndex,
+      dayIndex,
+      nextCell.teacherId
+    );
+    if (overlapClasses.length === 0) return [];
+
+    const weekSchedule = allSchedules?.[weekName];
+    if (!weekSchedule) return [];
+
+    const sourcePos = { weekName, className, p: periodIndex, d: dayIndex };
+    const plans = [];
+
+    overlapClasses.forEach((conflictClass) => {
+      const conflictSourcePos = { weekName, className: conflictClass, p: periodIndex, d: dayIndex };
+      const conflictSourceCell = weekSchedule?.[conflictClass]?.[periodIndex]?.[dayIndex];
+      if (!isSpecialLikeCell(conflictSourceCell)) return;
+
+      for (let d = 0; d < DAYS.length; d++) {
+        for (let p = 0; p < PERIODS.length; p++) {
+          if (p === periodIndex && d === dayIndex) continue;
+          const candidateCell = weekSchedule?.[conflictClass]?.[p]?.[d];
+          if (!candidateCell || isHolidayCell(candidateCell) || isSpecialLikeCell(candidateCell)) continue;
+
+          const conflictTargetPos = { weekName, className: conflictClass, p, d };
+          const evaluation = evaluateSpecialSwapTarget(
+            conflictSourcePos,
+            conflictSourceCell,
+            conflictTargetPos,
+            candidateCell,
+            allSchedules
+          );
+          if (!evaluation.canSwap) continue;
+
+          const operations = [
+            { kind: 'swap', a: conflictSourcePos, b: conflictTargetPos },
+            { kind: 'set', at: sourcePos, cell: { ...nextCell } }
+          ];
+          const quality = scoreResolutionPlan(operations);
+          plans.push({
+            id: `resolve-${conflictClass}-${p}-${d}`,
+            title: `추천: ${conflictClass} ${formatSlotLabel(periodIndex, dayIndex)} → ${formatSlotLabel(p, d)} 이동`,
+            details: [
+              `${conflictClass}의 ${nextCell.subject} 수업을 ${formatSlotLabel(p, d)}로 이동`,
+              `${className} ${formatSlotLabel(periodIndex, dayIndex)}에 ${nextCell.subject} 배치`
+            ],
+            operations,
+            score: quality.score,
+            warnings: quality.warnings
+          });
+        }
+      }
+    });
+
+    for (let d = 0; d < DAYS.length; d++) {
+      for (let p = 0; p < PERIODS.length; p++) {
+        if (p === periodIndex && d === dayIndex) continue;
+        const candidateCell = weekSchedule?.[className]?.[p]?.[d];
+        if (!candidateCell || isHolidayCell(candidateCell) || isSpecialLikeCell(candidateCell)) continue;
+        const conflicts = findTeacherConflictClassesAtSlot(
+          allSchedules,
+          weekName,
+          p,
+          d,
+          nextCell.teacherId,
+          [{ weekName, className, p: periodIndex, d: dayIndex }]
+        );
+        if (conflicts.length > 0) continue;
+
+        const targetPos = { weekName, className, p, d };
+        const operations = [
+          {
+            kind: 'set',
+            at: targetPos,
+            cell: {
+              ...nextCell,
+              id: `${className}-${p}-${d}`
+            }
+          }
+        ];
+        const quality = scoreResolutionPlan(operations);
+        plans.push({
+          id: `alternative-${className}-${p}-${d}`,
+          title: `대안: ${className} ${formatSlotLabel(p, d)}에 배치`,
+          details: [
+            `${className} ${formatSlotLabel(periodIndex, dayIndex)}는 유지`,
+            `${className} ${formatSlotLabel(p, d)}에 ${nextCell.subject} 배치`
+          ],
+          operations,
+          score: quality.score + 8,
+          warnings: quality.warnings
+        });
+      }
+    }
+
+    const forcedOperations = [
+      {
+        kind: 'set',
+        at: sourcePos,
+        cell: { ...nextCell, forcedConflict: true }
+      }
+    ];
+    const forcedQuality = scoreResolutionPlan(forcedOperations, { isForced: true });
+    plans.push({
+      id: 'forced-apply',
+      title: '강제 적용 (빨간 테두리 표시)',
+      details: [`${className} ${formatSlotLabel(periodIndex, dayIndex)}에 ${nextCell.subject} 강제 배치`],
+      operations: forcedOperations,
+      score: forcedQuality.score,
+      warnings: forcedQuality.warnings
+    });
+
+    return plans
+      .sort((a, b) => a.score - b.score)
+      .slice(0, 10);
+  };
+
+  const applyResolutionPlan = (plan) => {
+    if (!plan || !Array.isArray(plan.operations)) return;
+    const nextAllSchedules = applyResolutionOperations(allSchedules, plan.operations);
+    const weekKeys = Array.from(new Set(
+      plan.operations
+        .flatMap((operation) => {
+          if (operation.kind === 'swap') return [operation.a?.weekName, operation.b?.weekName];
+          if (operation.kind === 'set') return [operation.at?.weekName];
+          return [];
+        })
+        .filter(Boolean)
+    ));
+
+    applyScheduleChangeWithHistory({
+      nextAllSchedules,
+      nextSelectedCell: null,
+      changeLogEntry: createChangeLogEntry({
+        type: 'auto_resolve',
+        summary: `[자동 해결] ${plan.title}`,
+        announcementText: `[자동 해결] ${plan.title}`,
+        weekKeys
+      })
+    });
+
+    const warningText = (plan.warnings || []).join(' ');
+    if (warningText) {
+      showNotification(`해결안 적용 완료. ${warningText}`, 'info', { actionType: 'undo', duration: 5500 });
+    } else {
+      showNotification('충돌 해결안을 적용했습니다.', 'success', { actionType: 'undo', duration: 5500 });
+    }
+    setPendingResolution(null);
+  };
+
   const applySubjectChangeToCell = (weekName, className, p, d, newSubjectSelection) => {
     const currentCell = allSchedules?.[weekName]?.[className]?.[p]?.[d];
     if (!currentCell) return;
@@ -1964,6 +2486,29 @@ export default function TimetableApp() {
       location: finalLocation,
       id: `${className}-${p}-${d}`
     };
+
+    if (nextCell.type === 'special' && nextCell.teacherId) {
+      const plans = buildSpecialConflictResolutionPlans({
+        weekName,
+        className,
+        periodIndex: p,
+        dayIndex: d,
+        nextCell
+      });
+      if (plans.length > 0) {
+        setPendingResolution({
+          weekName,
+          className,
+          periodIndex: p,
+          dayIndex: d,
+          currentSubject: previousSubjectLabel,
+          nextSubject: nextCell.subject,
+          teacherName: nextCell.teacher,
+          plans
+        });
+        return;
+      }
+    }
 
     newAllSchedules[weekName][className][p][d] = nextCell;
     const nextSelectedCell = selectedCell && selectedCell.weekName === weekName && selectedCell.className === className && selectedCell.p === p && selectedCell.d === d
@@ -2093,7 +2638,7 @@ export default function TimetableApp() {
     const ok = window.confirm('현재 전담 교사 설정으로 전체 시간표를 새로 배정하시겠습니까?');
     if (!ok) return;
 
-    const nextAllSchedules = createAllSchedules(teacherConfigs);
+    const nextAllSchedules = createAllSchedules(teacherConfigs, classNames, allSubjects);
     applyScheduleChangeWithHistory({
       nextAllSchedules,
       nextSelectedCell: null,
@@ -2162,8 +2707,14 @@ export default function TimetableApp() {
 
     const nextAllSchedules = { ...allSchedules, [weekName]: { ...sourceWeek } };
 
-    CLASSES.forEach((className) => {
-      const classRows = sourceWeek[className];
+    classNames.forEach((className) => {
+      const classRows = sourceWeek[className] || Array.from(
+        { length: PERIODS.length },
+        (_, periodIndex) => Array.from(
+          { length: DAYS.length },
+          (_, dayIndex) => createHomeroomFallbackCell(className, periodIndex, dayIndex, allSubjects)
+        )
+      );
       nextAllSchedules[weekName][className] = classRows.map((row, periodIndex) => {
         const copiedRow = [...row];
         validDayIndices.forEach((dayIndex) => {
@@ -2214,8 +2765,14 @@ export default function TimetableApp() {
     const nextAllSchedules = { ...allSchedules, [weekName]: { ...sourceWeek } };
     let restoredCount = 0;
 
-    CLASSES.forEach((className) => {
-      const classRows = sourceWeek[className];
+    classNames.forEach((className) => {
+      const classRows = sourceWeek[className] || Array.from(
+        { length: PERIODS.length },
+        (_, periodIndex) => Array.from(
+          { length: DAYS.length },
+          (_, dayIndex) => createHomeroomFallbackCell(className, periodIndex, dayIndex, allSubjects)
+        )
+      );
       nextAllSchedules[weekName][className] = classRows.map((row, periodIndex) => {
         const copiedRow = [...row];
         validDayIndices.forEach((dayIndex) => {
@@ -2532,14 +3089,15 @@ export default function TimetableApp() {
   // --- 집계 로직 (전체 학급 교과 시수) ---
   const calculateAllClassesSummary = () => {
     const counts = {};
-    CLASSES.forEach(cls => {
+    classNames.forEach(cls => {
       counts[cls] = {};
-      ALL_SUBJECTS.forEach(s => counts[cls][s] = 0);
+      allSubjects.forEach(s => counts[cls][s] = 0);
     });
     
     Object.values(allSchedules).forEach(week => {
-      CLASSES.forEach(cls => {
-        week[cls].forEach(dayRows => {
+      classNames.forEach(cls => {
+        const classRows = week?.[cls] || [];
+        classRows.forEach(dayRows => {
           dayRows.forEach(cell => {
             if (cell.subject && cell.subject !== '휴업일') {
               counts[cls][cell.subject] = (counts[cls][cell.subject] || 0) + 1;
@@ -2624,7 +3182,7 @@ export default function TimetableApp() {
               </div>
 
               <div className="flex flex-wrap gap-1 bg-gray-100 p-1.5 rounded-lg w-full xl:w-auto justify-start">
-                {CLASSES.map(cls => (
+                {classNames.map(cls => (
                   <button key={cls} onClick={() => setCurrentClass(cls)} className={`px-2 py-1.5 whitespace-nowrap text-sm rounded-md font-semibold transition-colors ${currentClass === cls ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
                     {cls}
                   </button>
@@ -2726,7 +3284,7 @@ export default function TimetableApp() {
               ) : (
                 <div className="flex flex-col lg:flex-row lg:justify-between lg:items-center gap-3 bg-white p-2 border border-gray-200 rounded-lg shadow-sm">
                   <div className="text-xs md:text-sm font-semibold text-indigo-700 bg-indigo-50 border border-indigo-100 px-3 py-1.5 rounded-lg">
-                    종합표 내용(1~12반)을 주차 카드 형태로 표시
+                    종합표 내용({classNames.length > 0 ? `${classNames[0]}~${classNames[classNames.length - 1]}` : '학급 없음'})을 주차 카드 형태로 표시
                   </div>
                   <div className="flex items-center gap-2 bg-indigo-50 border border-indigo-100 rounded-lg px-2 py-1.5">
                     <span className="text-xs font-bold text-indigo-600 whitespace-nowrap">텍스트 크기</span>
@@ -2870,7 +3428,7 @@ export default function TimetableApp() {
                     className="w-full border border-gray-300 p-2 rounded-md shadow-inner focus:outline-none focus:ring-2 focus:ring-yellow-500 bg-gray-50 font-bold text-gray-700"
                   >
                     <option value="" disabled>-- 과목 선택 --</option>
-                    {SUBJECT_SELECT_OPTIONS.map((opt) => (
+                    {subjectSelectOptions.map((opt) => (
                       <option key={opt.value} value={opt.value}>{opt.label}</option>
                     ))}
                   </select>
@@ -3013,6 +3571,58 @@ export default function TimetableApp() {
           </div>
         )}
 
+        {pendingResolution && (
+          <div className="fixed inset-0 z-[85] bg-black/40 flex items-center justify-center p-3">
+            <div className="w-full max-w-3xl bg-white rounded-2xl shadow-2xl border border-gray-200 overflow-hidden max-h-[88vh] flex flex-col">
+              <div className="px-4 py-3 border-b border-gray-200 bg-slate-50 flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-bold text-slate-900">전담 충돌 해결안 선택</p>
+                  <p className="text-xs text-slate-600 mt-1">
+                    [{pendingResolution.weekName}] {pendingResolution.className} {formatSlotLabel(pendingResolution.periodIndex, pendingResolution.dayIndex)} ·
+                    {` ${pendingResolution.currentSubject} → ${pendingResolution.nextSubject}`}
+                    {pendingResolution.teacherName ? ` (${pendingResolution.teacherName})` : ''}
+                  </p>
+                </div>
+                <button
+                  onClick={() => setPendingResolution(null)}
+                  className="px-2 py-1 text-xs font-bold rounded border border-gray-300 bg-white text-gray-600 hover:bg-gray-100"
+                >
+                  닫기
+                </button>
+              </div>
+
+              <div className="p-4 overflow-y-auto space-y-3">
+                {pendingResolution.plans.map((plan, idx) => (
+                  <button
+                    key={plan.id}
+                    onClick={() => applyResolutionPlan(plan)}
+                    className="w-full text-left border border-gray-200 rounded-xl p-3 hover:border-blue-300 hover:bg-blue-50/40 transition-colors"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="text-sm font-bold text-gray-900">
+                        {idx + 1}. {plan.title}
+                      </p>
+                      <span className="text-[11px] font-semibold px-2 py-0.5 rounded bg-gray-100 text-gray-600">
+                        점수 {plan.score}
+                      </span>
+                    </div>
+                    <div className="mt-2 text-xs text-gray-700 space-y-1">
+                      {(plan.details || []).map((detail, detailIdx) => (
+                        <p key={`${plan.id}-detail-${detailIdx}`}>• {detail}</p>
+                      ))}
+                    </div>
+                    {Array.isArray(plan.warnings) && plan.warnings.length > 0 && (
+                      <div className="mt-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                        {plan.warnings.join(' ')}
+                      </div>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
         {cellSubjectContextMenu && (
           <div
             ref={contextMenuRef}
@@ -3030,7 +3640,7 @@ export default function TimetableApp() {
               className="w-full border border-gray-300 rounded-md px-2 py-2 text-sm bg-gray-50 font-semibold text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-400"
             >
               <option value="">빈칸 (삭제)</option>
-              {SUBJECT_SELECT_OPTIONS.map((opt) => (
+              {subjectSelectOptions.map((opt) => (
                 <option key={`context-${opt.value}`} value={opt.value}>{opt.label}</option>
               ))}
             </select>
@@ -3075,7 +3685,8 @@ export default function TimetableApp() {
                     <tr key={period}>
                       <td className="text-center font-bold text-gray-500 border-r border-gray-100 bg-gray-50/50">{period}교시</td>
                       {DAYS.map((day, dIndex) => {
-                        const cell = schedules[currentClass][pIndex][dIndex];
+                        const cell = schedules?.[currentClass]?.[pIndex]?.[dIndex]
+                          || createHomeroomFallbackCell(currentClass, pIndex, dIndex, allSubjects);
                         const { style, overlay } = getCellStyles(pIndex, dIndex, cell);
                         return (
                           <td key={`${currentWeekName}-${pIndex}-${dIndex}`} className="p-1 align-middle">
@@ -3119,7 +3730,7 @@ export default function TimetableApp() {
               <p className="text-xs text-gray-500">각 학급 주간표를 전체 화면에 배치했습니다. 전담 중복은 빨간 테두리, 전담 원배치/템플릿 불일치는 파란 테두리로 표시되며 텍스트 크기는 상단 슬라이더로 조정할 수 있습니다.</p>
             </div>
             <div className="p-3 md:p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
-              {CLASSES.map((cls) => (
+              {classNames.map((cls) => (
                 <div key={cls} className={`border rounded-xl overflow-hidden ${currentClass === cls ? 'border-blue-300 ring-2 ring-blue-100' : 'border-gray-200'}`}>
                   <div className="px-2.5 py-2 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
                     <button onClick={() => setCurrentClass(cls)} className="font-bold text-sm text-gray-800 hover:text-blue-600">
@@ -3199,7 +3810,7 @@ export default function TimetableApp() {
                   <tr className="bg-gray-800 text-white">
                     <th className="p-2 w-20 border-r border-gray-700" colSpan={2}>주차/요일</th>
                     <th className="p-2 w-14 border-r border-gray-700">교시</th>
-                    {CLASSES.map(cls => <th key={cls} className="p-2 border-r border-gray-700 font-bold">{cls}</th>)}
+                    {classNames.map(cls => <th key={cls} className="p-2 border-r border-gray-700 font-bold">{cls}</th>)}
                   </tr>
                 </thead>
                 <tbody className="bg-white">
@@ -3223,8 +3834,9 @@ export default function TimetableApp() {
                               </td>
                             )}
                             <td className="border border-gray-300 text-gray-500 w-14 text-center bg-white">{period}교시</td>
-                            {CLASSES.map(cls => {
-                              const cell = weekSchedules[cls][pIdx][dIdx];
+                            {classNames.map(cls => {
+                              const cell = weekSchedules?.[cls]?.[pIdx]?.[dIdx]
+                                || createHomeroomFallbackCell(cls, pIdx, dIdx, allSubjects);
                               const isSpecial = cell.type !== 'homeroom' && cell.type !== 'empty' && cell.type !== 'holiday';
                               const isHighlighted = hasTeacherHighlightFilter && cell.teacherId && highlightTeacherIds.includes(cell.teacherId);
                               const isDimmed = hasTeacherHighlightFilter && !isHighlighted;
@@ -3305,7 +3917,9 @@ export default function TimetableApp() {
                   <div key={`monthly-all-classes-week-${weekName}`} className="border border-indigo-200 rounded-xl overflow-hidden bg-white">
                     <div className="px-3 py-2 bg-indigo-100 border-b border-indigo-200 flex items-center justify-between">
                       <p className="text-xs font-bold text-indigo-900 truncate">{weekName}</p>
-                      <span className="text-[11px] text-indigo-600 font-semibold">1반~12반</span>
+                      <span className="text-[11px] text-indigo-600 font-semibold">
+                        {classNames.length > 0 ? `${classNames[0]}~${classNames[classNames.length - 1]}` : '학급 없음'}
+                      </span>
                     </div>
                     <div
                       className={`overflow-auto ${isSpacePanMode ? 'cursor-grab select-none' : ''}`}
@@ -3318,7 +3932,7 @@ export default function TimetableApp() {
                             {dayHeaders.map((dayLabel) => (
                               <th
                                 key={`monthly-all-day-head-${weekName}-${dayLabel}`}
-                                colSpan={CLASSES.length}
+                                colSpan={classNames.length}
                                 className="p-1.5 font-bold text-gray-700 bg-indigo-50 border border-indigo-100"
                                 style={{ fontSize: `${Math.max(9, Math.min(13, 10.5 * getMonthlyScaleRatio())).toFixed(1)}px` }}
                               >
@@ -3328,7 +3942,7 @@ export default function TimetableApp() {
                           </tr>
                           <tr>
                             {DAYS.map((day) => (
-                              CLASSES.map((cls) => (
+                              classNames.map((cls) => (
                                 <th
                                   key={`monthly-all-class-head-${weekName}-${day}-${cls}`}
                                   className="p-0.5 text-[10px] font-semibold text-gray-500 bg-gray-50 border border-gray-200"
@@ -3349,8 +3963,9 @@ export default function TimetableApp() {
                                 {period}
                               </td>
                               {DAYS.map((_, dIdx) => (
-                                CLASSES.map((cls) => {
-                                  const cell = weekSchedules[cls][pIdx][dIdx];
+                                classNames.map((cls) => {
+                                  const cell = weekSchedules?.[cls]?.[pIdx]?.[dIdx]
+                                    || createHomeroomFallbackCell(cls, pIdx, dIdx, allSubjects);
                                   const { style, overlay } = getMonthlyClassCellStyles(weekName, cls, pIdx, dIdx, cell, true);
                                   const hasTeacherLine = cell.type === 'special' && Boolean(cell.teacher);
                                   const denseFitScale = getMonthlyDenseCellFitScale(cell);
@@ -3399,7 +4014,7 @@ export default function TimetableApp() {
           const allClassCounts = calculateAllClassesSummary();
           let totalStandard = 0;
           const totalActualByClass = {};
-          CLASSES.forEach(c => totalActualByClass[c] = 0);
+          classNames.forEach(c => totalActualByClass[c] = 0);
           
           return (
             <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 animate-fade-in">
@@ -3415,11 +4030,11 @@ export default function TimetableApp() {
                     <tr className="bg-gray-100 text-gray-800">
                       <th className="border border-gray-300 p-2 font-bold whitespace-nowrap">과목 / 활동</th>
                       <th className="border border-gray-300 p-2 font-bold bg-yellow-50 w-24">기준 시수</th>
-                      {CLASSES.map(cls => <th key={cls} className="border border-gray-300 p-2 font-bold w-12 md:w-16">{cls}</th>)}
+                      {classNames.map(cls => <th key={cls} className="border border-gray-300 p-2 font-bold w-12 md:w-16">{cls}</th>)}
                     </tr>
                   </thead>
                   <tbody>
-                    {ALL_SUBJECTS.filter(s => s !== '휴업일').map(subj => {
+                    {allSubjects.filter(s => s !== '휴업일').map(subj => {
                       const standard = Number(standardHours[subj]) || 0;
                       totalStandard += standard;
 
@@ -3435,7 +4050,7 @@ export default function TimetableApp() {
                               placeholder="0"
                             />
                           </td>
-                          {CLASSES.map(cls => {
+                          {classNames.map(cls => {
                             const actual = allClassCounts[cls][subj] || 0;
                             totalActualByClass[cls] += actual;
                             const diff = actual - standard;
@@ -3462,7 +4077,7 @@ export default function TimetableApp() {
                     <tr className="bg-emerald-50 border-t-2 border-emerald-200">
                       <td className="border border-gray-300 p-2 font-extrabold text-emerald-900">총계</td>
                       <td className="border border-gray-300 p-2 font-extrabold text-emerald-900 text-lg">{totalStandard}</td>
-                      {CLASSES.map(cls => {
+                      {classNames.map(cls => {
                         const total = totalActualByClass[cls];
                         const diff = total - totalStandard;
                         let color = "text-emerald-800";
@@ -3499,7 +4114,7 @@ export default function TimetableApp() {
                   <tr className="bg-gray-100 text-gray-800">
                     <th className="border border-gray-300 p-3 font-bold w-32">교사명</th>
                     <th className="border border-gray-300 p-3 font-bold w-24">담당 과목</th>
-                    {CLASSES.map(cls => <th key={cls} className="border border-gray-300 p-3 w-16 text-sm">{cls}</th>)}
+                    {classNames.map(cls => <th key={cls} className="border border-gray-300 p-3 w-16 text-sm">{cls}</th>)}
                     <th className="border border-gray-300 p-3 font-bold bg-green-50 w-24">총 시수</th>
                   </tr>
                 </thead>
@@ -3512,9 +4127,10 @@ export default function TimetableApp() {
                         <td className="border border-gray-300 p-3">
                           <span className={`px-2 py-1 rounded text-xs font-bold text-gray-900 ${getSubjectColor(teacher.subject)}`}>{teacher.subject}</span>
                         </td>
-                        {CLASSES.map(cls => {
+                        {classNames.map(cls => {
                           let count = 0;
-                          schedules[cls].forEach(row => row.forEach(cell => { if(cell.teacherId === teacher.id) count++; }));
+                          const classRows = schedules?.[cls] || [];
+                          classRows.forEach((row) => row.forEach((cell) => { if (cell.teacherId === teacher.id) count++; }));
                           total += count;
                           return <td key={cls} className={`border border-gray-300 p-3 font-medium ${count > 0 ? 'text-blue-600 bg-blue-50/30' : 'text-gray-300'}`}>{count > 0 ? count : '-'}</td>;
                         })}
@@ -3532,8 +4148,66 @@ export default function TimetableApp() {
         {viewMode === 'settings' && (
           <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 animate-fade-in">
             <div className="flex flex-col md:flex-row md:justify-between md:items-center mb-6 border-b pb-4 gap-3">
-              <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2"><Settings className="text-orange-600"/> 전담 교사 관리</h2>
-              <button onClick={handleResetAllSchedules} className="px-4 py-2 bg-red-50 text-red-600 border border-red-200 rounded-lg hover:bg-red-100 font-bold text-sm whitespace-nowrap">전체 초기화 (새로 배정)</button>
+              <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2"><Settings className="text-orange-600"/> 기본 설정 및 전담 교사 관리</h2>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={clearAllSpecialConfigurations}
+                  className="px-4 py-2 bg-amber-50 text-amber-700 border border-amber-200 rounded-lg hover:bg-amber-100 font-bold text-sm whitespace-nowrap"
+                >
+                  전담 설정 전체 삭제
+                </button>
+                <button
+                  onClick={handleResetAllSchedules}
+                  className="px-4 py-2 bg-red-50 text-red-600 border border-red-200 rounded-lg hover:bg-red-100 font-bold text-sm whitespace-nowrap"
+                >
+                  전체 초기화 (새로 배정)
+                </button>
+              </div>
+            </div>
+
+            <div className="mb-6 border border-emerald-200 rounded-xl overflow-hidden">
+              <div className="bg-emerald-50 px-4 py-3 border-b border-emerald-100 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-2">
+                <h3 className="font-bold text-emerald-900">학급 수 / 과목 설정</h3>
+                <span className="text-xs text-emerald-700 font-medium">대회 제출용 기본값으로 손쉽게 재설정할 수 있습니다.</span>
+              </div>
+
+              <div className="p-4 grid grid-cols-1 lg:grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-xs font-bold text-gray-500 mb-1">학급 수</label>
+                  <input
+                    type="number"
+                    min={MIN_CLASS_COUNT}
+                    max={MAX_CLASS_COUNT}
+                    value={classCountInput}
+                    onChange={(e) => setClassCountInput(e.target.value)}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
+                  />
+                  <p className="mt-1 text-[11px] text-gray-500">허용 범위: {MIN_CLASS_COUNT}~{MAX_CLASS_COUNT}</p>
+                </div>
+
+                <div className="lg:col-span-2">
+                  <label className="block text-xs font-bold text-gray-500 mb-1">시간표 과목 목록 (줄바꿈 또는 쉼표 구분)</label>
+                  <textarea
+                    value={subjectsInputText}
+                    onChange={(e) => setSubjectsInputText(e.target.value)}
+                    className="w-full min-h-[120px] border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-400"
+                    placeholder={'국어\n수학\n사회\n체육\n영어\n창체\n휴업일'}
+                  />
+                  <p className="mt-1 text-[11px] text-gray-500">`휴업일`은 자동으로 유지됩니다.</p>
+                </div>
+              </div>
+
+              <div className="px-4 pb-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+                <p className="text-xs text-emerald-700">
+                  현재 적용값: 학급 <span className="font-bold">{classCount}개</span> / 과목 <span className="font-bold">{allSubjects.join(', ')}</span>
+                </p>
+                <button
+                  onClick={applyClassAndSubjectSettings}
+                  className="px-4 py-2 text-sm font-bold bg-emerald-600 text-white rounded border border-emerald-600 hover:bg-emerald-700"
+                >
+                  학급/과목 설정 적용
+                </button>
+              </div>
             </div>
 
             <div className="mb-6 border border-slate-200 rounded-xl overflow-hidden">
@@ -3683,8 +4357,8 @@ export default function TimetableApp() {
 
                   <div>
                     <label className="block text-xs font-bold text-gray-500 mb-2">담당 학급</label>
-                    <div className="grid grid-cols-4 gap-2">
-                      {Array.from({ length: 12 }, (_, idx) => idx + 1).map((classNum) => {
+                    <div className="grid grid-cols-4 sm:grid-cols-5 gap-2">
+                      {Array.from({ length: classCount }, (_, idx) => idx + 1).map((classNum) => {
                         const isSelected = teacherForm.classes.includes(classNum);
                         return (
                           <button

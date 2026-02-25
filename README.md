@@ -83,6 +83,9 @@ Cloudflare Pages에서 설정:
 - `src/App.jsx`: 기존 `app.jsx`를 React 앱으로 이전
 - `src/App.jsx`: "전체 초기화" 시 주차별 데이터 구조가 깨지던 문제 수정
 - `src/App.jsx`: Supabase 기반 실시간 동기화(초기 로드, 변경 업서트, 원격 변경 반영) 추가
+- `src/App.jsx`: 학급 수/과목 목록을 설정에서 동적으로 변경 가능하도록 확장
+- `src/App.jsx`: 기본 전담 교사 프리셋 제거(대회 제출용 초기값 정리)
+- `src/App.jsx`: 전담 충돌 시 자동 해결안(Plan) 제안 모달 및 원자적 적용(Undo 1회) 추가
 - `src/lib/supabaseClient.js`: Supabase 클라이언트 초기화 추가
 - `supabase/schema.sql`: 공유 상태 테이블/RLS/Realtime publication 추가
 - `src/main.jsx`, `src/index.css`: 앱 엔트리/스타일 추가

@@ -51,7 +51,7 @@ npm run dev
 ## 4) How sync works in this app
 
 - The app stores one shared row (`id = 'main'`) in `public.timetable_state`.
-- Every change to timetable/standard-hours/teacher-config is upserted.
+- Every change to timetable/standard-hours/teacher-config and class settings (`classCount`, `subjects`) is upserted.
 - Other connected clients receive updates via Realtime and apply them immediately.
 
 ## 5) Important limits and caution
