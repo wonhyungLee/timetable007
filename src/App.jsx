@@ -2285,13 +2285,17 @@ export default function TimetableApp() {
     if (!weekSchedule) return [];
 
     const sourcePos = { weekName, className, p: periodIndex, d: dayIndex };
+    const sourceLabel = formatSlotLabel(periodIndex, dayIndex);
     const plans = [];
 
-    overlapClasses.forEach((conflictClass) => {
+    const conflictGroups = overlapClasses.map((conflictClass) => {
       const conflictSourcePos = { weekName, className: conflictClass, p: periodIndex, d: dayIndex };
       const conflictSourceCell = weekSchedule?.[conflictClass]?.[periodIndex]?.[dayIndex];
-      if (!isSpecialLikeCell(conflictSourceCell)) return;
+      if (!isSpecialLikeCell(conflictSourceCell)) {
+        return { className: conflictClass, options: [] };
+      }
 
+      const options = [];
       for (let d = 0; d < DAYS.length; d++) {
         for (let p = 0; p < PERIODS.length; p++) {
           if (p === periodIndex && d === dayIndex) continue;
@@ -2308,25 +2312,62 @@ export default function TimetableApp() {
           );
           if (!evaluation.canSwap) continue;
 
+          options.push({
+            id: `${conflictClass}-${p}-${d}`,
+            optionLabel: `${conflictClass} ${sourceLabel} → ${formatSlotLabel(p, d)}`,
+            detail: `${conflictClass} ${sourceLabel} 수업을 ${formatSlotLabel(p, d)}${candidateCell.subject ? ` (${getCellLabel(candidateCell)} 교환)` : ' (빈칸 이동)'}`,
+            priority: candidateCell.subject ? 1 : 0,
+            operation: { kind: 'swap', a: conflictSourcePos, b: conflictTargetPos }
+          });
+        }
+      }
+
+      options.sort((a, b) =>
+        a.priority - b.priority ||
+        a.operation.b.d - b.operation.b.d ||
+        a.operation.b.p - b.operation.b.p
+      );
+
+      return { className: conflictClass, options };
+    });
+
+    const unresolvedClasses = conflictGroups
+      .filter((group) => group.options.length === 0)
+      .map((group) => group.className);
+    const resolvableGroups = conflictGroups.filter((group) => group.options.length > 0);
+
+    if (resolvableGroups.length === overlapClasses.length && resolvableGroups.length > 0) {
+      const maxPlanCount = 8;
+      const buildCombinations = (index, pickedOptions) => {
+        if (plans.length >= maxPlanCount) return;
+        if (index >= resolvableGroups.length) {
           const operations = [
-            { kind: 'swap', a: conflictSourcePos, b: conflictTargetPos },
+            ...pickedOptions.map((item) => item.operation),
             { kind: 'set', at: sourcePos, cell: { ...nextCell } }
           ];
           const quality = scoreResolutionPlan(operations);
           plans.push({
-            id: `resolve-${conflictClass}-${p}-${d}`,
-            title: `추천: ${conflictClass} ${formatSlotLabel(periodIndex, dayIndex)} → ${formatSlotLabel(p, d)} 이동`,
+            id: `resolve-${pickedOptions.map((item) => item.id).join('-')}`,
+            title: `추천: ${pickedOptions.map((item) => item.optionLabel).join(' / ')}`,
             details: [
-              `${conflictClass}의 ${nextCell.subject} 수업을 ${formatSlotLabel(p, d)}로 이동`,
-              `${className} ${formatSlotLabel(periodIndex, dayIndex)}에 ${nextCell.subject} 배치`
+              ...pickedOptions.map((item) => item.detail),
+              `${className} ${sourceLabel}에 ${nextCell.subject} 배치`
             ],
             operations,
             score: quality.score,
             warnings: quality.warnings
           });
+          return;
         }
-      }
-    });
+
+        const group = resolvableGroups[index];
+        group.options.slice(0, 3).forEach((option) => {
+          buildCombinations(index + 1, [...pickedOptions, option]);
+        });
+      };
+
+      buildCombinations(0, []);
+    }
 
     for (let d = 0; d < DAYS.length; d++) {
       for (let p = 0; p < PERIODS.length; p++) {
@@ -2355,6 +2396,10 @@ export default function TimetableApp() {
           }
         ];
         const quality = scoreResolutionPlan(operations);
+        const warnings = [...quality.warnings];
+        if (candidateCell.subject) {
+          warnings.push(`기존 ${className} ${formatSlotLabel(p, d)} 수업(${getCellLabel(candidateCell)})을 덮어씁니다.`);
+        }
         plans.push({
           id: `alternative-${className}-${p}-${d}`,
           title: `대안: ${className} ${formatSlotLabel(p, d)}에 배치`,
@@ -2364,7 +2409,7 @@ export default function TimetableApp() {
           ],
           operations,
           score: quality.score + 8,
-          warnings: quality.warnings
+          warnings: Array.from(new Set(warnings))
         });
       }
     }
@@ -2377,13 +2422,17 @@ export default function TimetableApp() {
       }
     ];
     const forcedQuality = scoreResolutionPlan(forcedOperations, { isForced: true });
+    const forcedWarnings = [...forcedQuality.warnings];
+    if (unresolvedClasses.length > 0) {
+      forcedWarnings.push(`자동 이동 불가 학급: ${unresolvedClasses.join(', ')}`);
+    }
     plans.push({
       id: 'forced-apply',
       title: '강제 적용 (빨간 테두리 표시)',
       details: [`${className} ${formatSlotLabel(periodIndex, dayIndex)}에 ${nextCell.subject} 강제 배치`],
       operations: forcedOperations,
       score: forcedQuality.score,
-      warnings: forcedQuality.warnings
+      warnings: Array.from(new Set(forcedWarnings))
     });
 
     return plans
