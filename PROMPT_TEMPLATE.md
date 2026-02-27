@@ -1,4 +1,4 @@
-# (Optional) LLM Prompt Template: Timetable Move/Conflict Resolution
+# (Optional) LLM Prompt Template: Timetable Move/Swap Conflict Resolution
 
 > 이 프로젝트는 규칙 기반(탐색)으로 해결안을 계산하는 로직이 이미 포함되어 있습니다.
 > LLM을 붙이려면 **반드시 결과를 검증(Validation)하고, 실패 시 규칙 기반 로직으로 폴백**하는 것을 권장합니다.
@@ -54,7 +54,9 @@
 ```
 
 ### Task
-- 목표: attempt.target 위치에 attempt.source 수업을 옮기고, source는 빈칸으로 만든다.
+- 목표:
+  - type=move: attempt.target 위치에 attempt.source 수업을 옮기고, source는 빈칸으로 만든다.
+  - type=swap: attempt.source와 attempt.target의 수업을 서로 교환한다.
 - teacherId 기준 동시간대 중복을 없애기 위해, 필요한 경우 다른 학급/다른 칸을 먼저 이동/교환한다.
 - 가능한 한 적은 operations를 사용한다.
 - 1~5개의 plan을 제안한다.

@@ -2100,6 +2100,12 @@ export default function TimetableApp() {
         p,
         d
       };
+      if (isHolidayCell(sourceCellCurrent) || isHolidayCell(clickedCell)) {
+        showNotification('휴업일 칸은 수업 이동/교환 대상이 아닙니다. 설정에서 휴업일 해제 후 수정하세요.', 'error');
+        setSelectedCell(null);
+        return;
+      }
+
       let isForcedSpecialSwap = false;
       if (isSpecialLikeCell(sourceCellCurrent)) {
         const evaluation = evaluateSpecialSwapTarget(sourceMeta, sourceCellCurrent, targetMeta, clickedCell);
@@ -2132,18 +2138,40 @@ export default function TimetableApp() {
             }
           }
 
+
+          const canSuggestSwapPlan =
+            quickEditorAction === 'swap' &&
+            Boolean(clickedCell?.subject);
+
+          if (canSuggestSwapPlan) {
+            const plans = buildSpecialSwapConflictResolutionPlans({
+              sourceMeta,
+              sourceCell: sourceCellCurrent,
+              targetMeta,
+              targetCell: clickedCell
+            });
+
+            if (plans.length > 0) {
+              setPendingResolution({
+                weekName: targetMeta.weekName,
+                className: targetMeta.className,
+                periodIndex: targetMeta.p,
+                dayIndex: targetMeta.d,
+                currentSubject: getCellLabel(clickedCell),
+                nextSubject: getCellLabel(sourceCellCurrent),
+                teacherName: sourceCellCurrent.teacher,
+                plans
+              });
+              return;
+            }
+          }
+
           const shouldForceMove = window.confirm(
             buildSpecialForcedSwapConfirmMessage(sourceMeta, sourceCellCurrent, targetMeta, evaluation)
           );
           if (!shouldForceMove) return;
           isForcedSpecialSwap = true;
         }
-      }
-
-      if (isHolidayCell(sourceCellCurrent) || isHolidayCell(clickedCell)) {
-        showNotification('휴업일 칸은 수업 교환 대상이 아닙니다. 설정에서 휴업일 해제 후 수정하세요.', 'error');
-        setSelectedCell(null);
-        return;
       }
 
       const sourceCellForValidation = {
@@ -2465,6 +2493,196 @@ export default function TimetableApp() {
     });
 
     return plans
+      .sort((a, b) => a.score - b.score)
+      .slice(0, 10);
+  };
+
+
+  const buildSpecialSwapConflictResolutionPlans = ({
+    sourceMeta,
+    sourceCell,
+    targetMeta,
+    targetCell
+  }) => {
+    if (!sourceCell || !isSpecialLikeCell(sourceCell) || !sourceCell.teacherId) return [];
+    if (!targetMeta || !sourceMeta) return [];
+    if (isHolidayCell(sourceCell) || isHolidayCell(targetCell)) return [];
+
+    const sourceLabel = formatSlotLabel(sourceMeta.p, sourceMeta.d);
+    const targetLabel = formatSlotLabel(targetMeta.p, targetMeta.d);
+    const fromText = `[${sourceMeta.weekName}] ${sourceMeta.className} ${sourceLabel}`;
+    const toText = `[${targetMeta.weekName}] ${targetMeta.className} ${targetLabel}`;
+
+    const sourceTeacherId = sourceCell.teacherId;
+    const sourceTeacherName = sourceCell.teacher || getTeacherNameById(sourceTeacherId);
+    const sourceAllowed = teacherClassNameSetMap[sourceTeacherId];
+    const sourceClassMismatch =
+      sourceAllowed && sourceAllowed.size > 0 && !sourceAllowed.has(targetMeta.className);
+
+    const targetIsSpecial = isSpecialLikeCell(targetCell) && targetCell.teacherId;
+    const targetTeacherId = targetIsSpecial ? targetCell.teacherId : null;
+    const targetTeacherName = targetIsSpecial
+      ? targetCell.teacher || getTeacherNameById(targetTeacherId)
+      : '';
+    const targetAllowed = targetTeacherId ? teacherClassNameSetMap[targetTeacherId] : null;
+    const targetClassMismatch =
+      targetTeacherId && targetAllowed && targetAllowed.size > 0 && !targetAllowed.has(sourceMeta.className);
+
+    // 교환(스왑)은 set 2회로 표현한다. (기존 수동 교환 로직과 동일하게 forcedConflict를 기본 해제)
+    const baseSwapOps = [
+      { kind: 'set', at: targetMeta, cell: { ...sourceCell, forcedConflict: false } },
+      { kind: 'set', at: sourceMeta, cell: { ...targetCell, forcedConflict: false } }
+    ];
+
+    const buildForcedSwapPlan = (extraWarnings = []) => {
+      const forcedOps = [
+        { kind: 'set', at: targetMeta, cell: { ...sourceCell, forcedConflict: true } },
+        {
+          kind: 'set',
+          at: sourceMeta,
+          cell: targetIsSpecial ? { ...targetCell, forcedConflict: true } : { ...targetCell, forcedConflict: false }
+        }
+      ];
+
+      const quality = scoreResolutionPlan(forcedOps, { isForced: true });
+      const warnings = Array.from(new Set([...(quality.warnings || []), ...extraWarnings]));
+
+      return {
+        id: 'forced-swap',
+        title: '강제 교환 (빨간 테두리 표시)',
+        details: [
+          `${fromText} ↔ ${toText} 강제 교환`,
+          `${fromText}: ${getCellLabel(sourceCell)} ↔ ${toText}: ${getCellLabel(targetCell)}`
+        ],
+        operations: forcedOps,
+        score: quality.score,
+        warnings
+      };
+    };
+
+    const mismatchWarnings = [];
+    if (sourceClassMismatch) {
+      mismatchWarnings.push(`${sourceTeacherName} 선생님의 담당 학급이 아니라 정상 교환이 불가합니다.`);
+    }
+    if (targetClassMismatch) {
+      mismatchWarnings.push(`교환 대상 전담(${targetTeacherName})의 담당 학급이 아니라 정상 교환이 불가합니다.`);
+    }
+    if (mismatchWarnings.length > 0) {
+      return [buildForcedSwapPlan(mismatchWarnings)];
+    }
+
+    // 교환 후(가상) 상태에서 양쪽 전담 충돌을 각각 해결하는 Plan을 만든 뒤 결합한다.
+    const swappedSchedules = applyResolutionOperations(allSchedules, baseSwapOps);
+    const swappedTargetCell =
+      swappedSchedules?.[targetMeta.weekName]?.[targetMeta.className]?.[targetMeta.p]?.[targetMeta.d];
+    const swappedSourceCell =
+      swappedSchedules?.[sourceMeta.weekName]?.[sourceMeta.className]?.[sourceMeta.p]?.[sourceMeta.d];
+
+    const ensurePlanArray = (plans, fallbackId) => {
+      if (Array.isArray(plans) && plans.length > 0) return plans;
+      return [
+        {
+          id: fallbackId,
+          title: '충돌 없음',
+          details: [],
+          operations: [],
+          score: 0,
+          warnings: []
+        }
+      ];
+    };
+
+    const stripSlotSetOps = (operations, slotKey) => {
+      if (!Array.isArray(operations)) return [];
+      return operations.filter((op) => {
+        if (op?.kind !== 'set' || !op.at) return true;
+        const key = `${op.at.weekName}|${op.at.className}|${op.at.p}|${op.at.d}`;
+        if (key !== slotKey) return true;
+        // 강제 표시(forcedConflict) set은 유지한다.
+        return Boolean(op.cell?.forcedConflict);
+      });
+    };
+
+    const buildKeepSlotPlans = (pos, cell, fallbackId) => {
+      if (!isSpecialLikeCell(cell) || !cell.teacherId) {
+        return ensurePlanArray([], fallbackId);
+      }
+
+      const slotKey = `${pos.weekName}|${pos.className}|${pos.p}|${pos.d}`;
+      const rawPlans = buildSpecialConflictResolutionPlans({
+        weekName: pos.weekName,
+        className: pos.className,
+        periodIndex: pos.p,
+        dayIndex: pos.d,
+        nextCell: { ...cell, forcedConflict: false },
+        schedulesMap: swappedSchedules
+      });
+
+      // "대안 배치"는 교환 목표와 맞지 않으므로 제외하고,
+      // 해당 슬롯을 유지(set)하는 플랜만 남긴다.
+      const filtered = (Array.isArray(rawPlans) ? rawPlans : []).filter((plan) => {
+        const ops = Array.isArray(plan.operations) ? plan.operations : [];
+        return ops.some((op) =>
+          op.kind === 'set' &&
+          op.at &&
+          `${op.at.weekName}|${op.at.className}|${op.at.p}|${op.at.d}` === slotKey
+        );
+      });
+
+      const base = ensurePlanArray(filtered, fallbackId);
+
+      // baseSwapOps가 이미 소스/타깃 셀 배치를 수행하므로, 중복 set(강제 제외)은 제거한다.
+      return base.map((plan) => ({
+        ...plan,
+        operations: stripSlotSetOps(plan.operations, slotKey)
+      }));
+    };
+
+    const targetPlans = buildKeepSlotPlans(targetMeta, swappedTargetCell, 'target-ok').slice(0, 5);
+    const sourcePlans = buildKeepSlotPlans(sourceMeta, swappedSourceCell, 'source-ok').slice(0, 5);
+
+    const combinedPlans = [];
+    const maxPlanCount = 10;
+
+    targetPlans.forEach((planA) => {
+      sourcePlans.forEach((planB) => {
+        if (combinedPlans.length >= maxPlanCount * 4) return;
+
+        const ops = [
+          ...baseSwapOps,
+          ...(Array.isArray(planA.operations) ? planA.operations : []),
+          ...(Array.isArray(planB.operations) ? planB.operations : [])
+        ];
+
+        const isForced = ops.some((op) => op.kind === 'set' && op.cell?.forcedConflict);
+        const quality = scoreResolutionPlan(ops, { isForced });
+
+        const warnings = Array.from(new Set([...(quality.warnings || [])]));
+        const details = [
+          `${fromText} ↔ ${toText} 교환 (${getCellLabel(sourceCell)} ↔ ${getCellLabel(targetCell)})`,
+          ...(Array.isArray(planA.details) ? planA.details : []),
+          ...(Array.isArray(planB.details) ? planB.details : [])
+        ].filter(Boolean);
+
+        const titleParts = [];
+        if (planA.id !== 'target-ok') titleParts.push(planA.title);
+        if (planB.id !== 'source-ok') titleParts.push(planB.title);
+
+        combinedPlans.push({
+          id: `swap-${planA.id}-${planB.id}`,
+          title: `교환 해결: ${sourceMeta.className} ${sourceLabel} ↔ ${targetMeta.className} ${targetLabel}${titleParts.length > 0 ? ` · ${titleParts.join(' / ')}` : ''}`,
+          details: Array.from(new Set(details)),
+          operations: ops,
+          score: quality.score,
+          warnings
+        });
+      });
+    });
+
+    // 강제 교환 옵션(최후 수단)은 항상 제공한다.
+    combinedPlans.push(buildForcedSwapPlan());
+
+    return combinedPlans
       .sort((a, b) => a.score - b.score)
       .slice(0, 10);
   };
