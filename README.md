@@ -86,9 +86,20 @@ Cloudflare Pages에서 설정:
 - `src/App.jsx`: 학급 수/과목 목록을 설정에서 동적으로 변경 가능하도록 확장
 - `src/App.jsx`: 기본 전담 교사 프리셋 제거(대회 제출용 초기값 정리)
 - `src/App.jsx`: 전담 충돌 시 자동 해결안(Plan) 제안 모달 및 원자적 적용(Undo 1회) 추가
+- `src/App.jsx`: 전담 수업 "이동" 시에도 이동 불가(동시간대 전담 중복) 상황이면 해결안(Plan) 자동 제안
 - `src/lib/supabaseClient.js`: Supabase 클라이언트 초기화 추가
 - `supabase/schema.sql`: 공유 상태 테이블/RLS/Realtime publication 추가
 - `src/main.jsx`, `src/index.css`: 앱 엔트리/스타일 추가
 - `tailwind.config.js`, `postcss.config.js`: Tailwind 설정 추가
 - `vite.config.js`, `index.html`, `package.json`: 빌드/실행 환경 구성
 - `CLOUDFLARE_SUPABASE_SETUP.md`: 배포+연동 상세 절차 추가
+
+## 7) 이동 불가 자동 해결안(Plan) 기능
+
+전담 수업(예: 과학/체육/음악 등)을 **빈칸으로 이동**하려고 할 때, 같은 시간에 다른 학급이 해당 전담 교사 수업을 가지고 있으면 1차적으로는 이동이 막힐 수 있습니다.
+
+이 경우 앱이 자동으로 **2~3단계 해결안(Plan)**을 만들어서 선택할 수 있게 제공합니다.
+
+- 예: `B반 (목 3교시 과학)`을 비우고 → `C반 (목 3교시 과학)`을 `B반 원래 시간`으로 이동 → 다시 `B반 과학`을 목표 시간으로 이동
+
+해결안 적용은 한 번에 적용되며, 적용 직후 상단 알림의 **되돌리기(Undo)** 로 원복할 수 있습니다.

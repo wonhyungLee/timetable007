@@ -2104,6 +2104,34 @@ export default function TimetableApp() {
       if (isSpecialLikeCell(sourceCellCurrent)) {
         const evaluation = evaluateSpecialSwapTarget(sourceMeta, sourceCellCurrent, targetMeta, clickedCell);
         if (!evaluation.canSwap) {
+          const canSuggestMovePlan =
+            quickEditorAction === 'move' &&
+            !clickedCell?.subject &&
+            evaluation.blockReason === 'source_teacher_busy';
+
+          if (canSuggestMovePlan) {
+            const plans = buildSpecialMoveConflictResolutionPlans({
+              sourceMeta,
+              sourceCell: sourceCellCurrent,
+              targetMeta,
+              targetCell: clickedCell
+            });
+
+            if (plans.length > 0) {
+              setPendingResolution({
+                weekName: targetMeta.weekName,
+                className: targetMeta.className,
+                periodIndex: targetMeta.p,
+                dayIndex: targetMeta.d,
+                currentSubject: getCellLabel(clickedCell),
+                nextSubject: getCellLabel(sourceCellCurrent),
+                teacherName: sourceCellCurrent.teacher,
+                plans
+              });
+              return;
+            }
+          }
+
           const shouldForceMove = window.confirm(
             buildSpecialForcedSwapConfirmMessage(sourceMeta, sourceCellCurrent, targetMeta, evaluation)
           );
@@ -2269,10 +2297,11 @@ export default function TimetableApp() {
     className,
     periodIndex,
     dayIndex,
-    nextCell
+    nextCell,
+    schedulesMap = allSchedules
   }) => {
     const overlapClasses = findTeacherOverlapClasses(
-      allSchedules,
+      schedulesMap,
       weekName,
       className,
       periodIndex,
@@ -2281,7 +2310,7 @@ export default function TimetableApp() {
     );
     if (overlapClasses.length === 0) return [];
 
-    const weekSchedule = allSchedules?.[weekName];
+    const weekSchedule = schedulesMap?.[weekName];
     if (!weekSchedule) return [];
 
     const sourcePos = { weekName, className, p: periodIndex, d: dayIndex };
@@ -2308,7 +2337,7 @@ export default function TimetableApp() {
             conflictSourceCell,
             conflictTargetPos,
             candidateCell,
-            allSchedules
+            schedulesMap
           );
           if (!evaluation.canSwap) continue;
 
@@ -2375,7 +2404,7 @@ export default function TimetableApp() {
         const candidateCell = weekSchedule?.[className]?.[p]?.[d];
         if (!candidateCell || isHolidayCell(candidateCell) || isSpecialLikeCell(candidateCell)) continue;
         const conflicts = findTeacherConflictClassesAtSlot(
-          allSchedules,
+          schedulesMap,
           weekName,
           p,
           d,
@@ -2436,6 +2465,91 @@ export default function TimetableApp() {
     });
 
     return plans
+      .sort((a, b) => a.score - b.score)
+      .slice(0, 10);
+  };
+
+  const buildSpecialMoveConflictResolutionPlans = ({
+    sourceMeta,
+    sourceCell,
+    targetMeta,
+    targetCell
+  }) => {
+    if (!sourceCell || !isSpecialLikeCell(sourceCell) || !sourceCell.teacherId) return [];
+    if (!targetMeta || !sourceMeta) return [];
+    if (isHolidayCell(sourceCell) || isHolidayCell(targetCell)) return [];
+
+    // 이동(빈칸으로) 상황에서 source 시간대를 비워두면,
+    // 다른 학급 전담을 "원래 자리"로 옮겨서 해결되는 2~3단계 해법까지 탐색 가능해진다.
+    const clearedSourceCell = {
+      subject: '',
+      type: 'empty',
+      forcedConflict: false,
+      id: `${sourceMeta.className}-${sourceMeta.p}-${sourceMeta.d}`
+    };
+
+    const nextCellAtTarget = {
+      ...sourceCell,
+      forcedConflict: false,
+      id: `${targetMeta.className}-${targetMeta.p}-${targetMeta.d}`
+    };
+
+    // 1) 우선 source 자리를 빈칸으로 만든 "가상 상태"에서 해결안 후보를 생성한다.
+    //    (source 시간을 활용하는 이동 경로를 찾기 위해)
+    const simulatedSchedules = applyResolutionOperations(allSchedules, [
+      { kind: 'set', at: sourceMeta, cell: clearedSourceCell }
+    ]);
+
+    // 2) target에 nextCell을 배치하기 위한 충돌 해결안(Plan)을 만든다.
+    const basePlans = buildSpecialConflictResolutionPlans({
+      weekName: targetMeta.weekName,
+      className: targetMeta.className,
+      periodIndex: targetMeta.p,
+      dayIndex: targetMeta.d,
+      nextCell: nextCellAtTarget,
+      schedulesMap: simulatedSchedules
+    });
+
+    if (!Array.isArray(basePlans) || basePlans.length === 0) return [];
+
+    const sourceLabel = formatSlotLabel(sourceMeta.p, sourceMeta.d);
+    const targetLabel = formatSlotLabel(targetMeta.p, targetMeta.d);
+    const fromText = `[${sourceMeta.weekName}] ${sourceMeta.className} ${sourceLabel}`;
+    const toText = `[${targetMeta.weekName}] ${targetMeta.className} ${targetLabel}`;
+
+    // 3) 실제 적용은 "target 배치 + source 비움"까지 포함해야 한다.
+    const enhanced = basePlans.map((plan) => {
+      const ops = Array.isArray(plan.operations) ? plan.operations : [];
+      const newOperations = [
+        ...ops,
+        { kind: 'set', at: sourceMeta, cell: clearedSourceCell }
+      ];
+
+      const isForced = newOperations.some(
+        (operation) => operation.kind === 'set' && operation.cell?.forcedConflict
+      );
+      const quality = scoreResolutionPlan(newOperations, { isForced });
+
+      const details = Array.isArray(plan.details) ? [...plan.details] : [];
+      details.push(`${fromText} 수업을 빈칸으로 이동(원래 자리 비움)`);
+      details.push(`${toText}에 ${getCellLabel(nextCellAtTarget)} 배치 완료`);
+
+      const warnings = Array.from(
+        new Set([...(Array.isArray(plan.warnings) ? plan.warnings : []), ...quality.warnings])
+      );
+
+      return {
+        ...plan,
+        id: `move-${plan.id}`,
+        title: `이동 해결: ${fromText} → ${toText} · ${plan.title}`,
+        details,
+        operations: newOperations,
+        score: quality.score,
+        warnings
+      };
+    });
+
+    return enhanced
       .sort((a, b) => a.score - b.score)
       .slice(0, 10);
   };
